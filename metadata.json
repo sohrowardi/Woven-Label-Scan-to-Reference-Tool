@@ -1,0 +1,6 @@
+{
+  "name": "Woven Label Scan-to-Reference Tool",
+  "description": "Translates blurry scans and photographs of woven labels into clean, grid-aligned, thread-accurate reference images for MÜCAD designers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
