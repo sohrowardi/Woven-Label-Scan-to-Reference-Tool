@@ -59,7 +59,7 @@ export default function App() {
 
   // Custom Yarn Palette
   const [yarns, setYarns] = useState<YarnColor[]>(DEFAULT_YARNS);
-  const [newYarnHex, setNewYarnHex] = useState("#3b82f6");
+  const [newYarnHex, setNewYarnHex] = useState("#ff0000");
   const [newYarnName, setNewYarnName] = useState("");
   const [newYarnRole, setNewYarnRole] = useState("Accent");
   const [newYarnIsMetallic, setNewYarnIsMetallic] = useState(false);
@@ -403,18 +403,18 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-stone-900 text-stone-100 font-sans selection:bg-amber-600 selection:text-white">
+    <div className="min-h-screen bg-stone-900 text-stone-100 font-sans selection:bg-[#ff0000] selection:text-white">
       {/* Header Banner */}
       <header className="border-b border-stone-800 bg-stone-950 px-6 py-4 sticky top-0 z-40 backdrop-blur-md bg-opacity-95">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="bg-amber-500 text-stone-950 p-2 rounded-lg font-bold shadow-lg shadow-amber-500/10 flex items-center justify-center">
+            <div className="bg-[#ff0000] text-white p-2 rounded-lg font-bold shadow-lg shadow-red-500/10 flex items-center justify-center">
               <Grid className="w-6 h-6" />
             </div>
             <div>
               <h1 className="text-xl font-semibold tracking-tight text-white flex items-center gap-2">
                 Woven Label Scan-to-Reference Tool
-                <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/25 px-1.5 py-0.5 rounded font-mono uppercase">
+                <span className="text-[10px] bg-red-500/10 text-red-500 border border-red-500/25 px-1.5 py-0.5 rounded font-mono uppercase">
                   MÜCAD Companion
                 </span>
               </h1>
@@ -439,7 +439,7 @@ export default function App() {
               href="#instructions"
               className="text-xs text-stone-400 hover:text-white px-3 py-1.5 rounded-md bg-stone-900 hover:bg-stone-850 border border-stone-800 transition flex items-center gap-1.5"
             >
-              <HelpCircle className="w-3.5 h-3.5 text-amber-500" /> Learn Workflow
+              <HelpCircle className="w-3.5 h-3.5 text-[#ff0000]" /> Learn Workflow
             </a>
           </div>
         </div>
@@ -451,7 +451,7 @@ export default function App() {
           /* Empty State: Initial Upload Zone */
           <div className="max-w-3xl mx-auto py-12">
             <div className="text-center space-y-6">
-              <div className="inline-flex p-4 rounded-2xl bg-stone-950 border border-stone-800 shadow-xl shadow-stone-950/20 text-amber-500 mb-2">
+              <div className="inline-flex p-4 rounded-2xl bg-stone-950 border border-stone-800 shadow-xl shadow-stone-950/20 text-[#ff0000] mb-2">
                 <Upload className="w-12 h-12" />
               </div>
               <div>
@@ -464,7 +464,7 @@ export default function App() {
               {/* Drag Drop Area */}
               <div
                 onClick={triggerUpload}
-                className="border-2 border-dashed border-stone-700 hover:border-amber-500 hover:bg-stone-950/40 rounded-xl p-10 cursor-pointer transition-all duration-200 bg-stone-950/20 space-y-4"
+                className="border-2 border-dashed border-stone-700 hover:border-red-500 hover:bg-stone-950/40 rounded-xl p-10 cursor-pointer transition-all duration-200 bg-stone-950/20 space-y-4"
               >
                 <input
                   type="file"
@@ -474,7 +474,7 @@ export default function App() {
                   className="hidden"
                 />
                 <div className="flex flex-col items-center justify-center gap-2">
-                  <span className="bg-amber-500 hover:bg-amber-400 text-stone-950 px-4 py-2 rounded-lg font-medium text-sm transition shadow-md">
+                  <span className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition shadow-md">
                     Select Scan File
                   </span>
                   <span className="text-xs text-stone-500">or drag and drop your image here</span>
@@ -626,7 +626,7 @@ export default function App() {
               <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 space-y-4 shadow-md">
                 <div className="flex items-center justify-between border-b border-stone-800 pb-3">
                   <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
-                    <Settings className="w-4 h-4 text-amber-500" /> 1. Weave Density &amp; Size
+                    <Settings className="w-4 h-4 text-red-500" /> 1. Weave Density &amp; Size
                   </h3>
                   <span className="text-[10px] bg-stone-850 text-stone-300 px-1.5 py-0.5 rounded font-mono">
                     Loom Setup
@@ -645,7 +645,7 @@ export default function App() {
                             type="number"
                             value={specs.widthMm}
                             onChange={(e) => setSpecs({ ...specs, widthMm: Math.max(1, parseFloat(e.target.value) || 0) })}
-                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-7 focus:border-amber-500 outline-none text-white font-mono"
+                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-7 focus:border-red-500 outline-none text-white font-mono"
                           />
                           <span className="absolute right-2 top-2 text-[10px] text-stone-500">mm</span>
                         </div>
@@ -657,7 +657,7 @@ export default function App() {
                             type="number"
                             value={specs.heightMm}
                             onChange={(e) => setSpecs({ ...specs, heightMm: Math.max(1, parseFloat(e.target.value) || 0) })}
-                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-7 focus:border-amber-500 outline-none text-white font-mono"
+                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-7 focus:border-red-500 outline-none text-white font-mono"
                           />
                           <span className="absolute right-2 top-2 text-[10px] text-stone-500">mm</span>
                         </div>
@@ -676,7 +676,7 @@ export default function App() {
                             type="number"
                             value={specs.warpDensity}
                             onChange={(e) => setSpecs({ ...specs, warpDensity: Math.max(10, parseInt(e.target.value) || 0) })}
-                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-12 focus:border-amber-500 outline-none text-white font-mono"
+                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-12 focus:border-red-500 outline-none text-white font-mono"
                           />
                           <span className="absolute right-2 top-2 text-[10px] text-stone-500">ends/cm</span>
                         </div>
@@ -688,7 +688,7 @@ export default function App() {
                             type="number"
                             value={specs.weftDensity}
                             onChange={(e) => setSpecs({ ...specs, weftDensity: Math.max(10, parseInt(e.target.value) || 0) })}
-                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-12 focus:border-amber-500 outline-none text-white font-mono"
+                            className="bg-stone-900 border border-stone-800 rounded px-2 py-1.5 w-full text-sm text-right pr-12 focus:border-red-500 outline-none text-white font-mono"
                           />
                           <span className="absolute right-2 top-2 text-[10px] text-stone-500">picks/cm</span>
                         </div>
@@ -698,7 +698,7 @@ export default function App() {
 
                   {/* Calculations breakdown block */}
                   <div className="bg-stone-900 p-3 rounded border border-stone-800/80 space-y-1.5">
-                    <span className="text-[10px] font-mono text-amber-500 font-semibold block uppercase tracking-wide">
+                    <span className="text-[10px] font-mono text-red-500 font-semibold block uppercase tracking-wide">
                       Calculated Loom Pixel Map Matrix:
                     </span>
                     <div className="flex justify-between text-xs">
@@ -721,9 +721,9 @@ export default function App() {
               <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 space-y-4 shadow-md">
                 <div className="flex items-center justify-between border-b border-stone-800 pb-3">
                   <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
-                    <SlidersHorizontal className="w-4 h-4 text-amber-500" /> 2. Image Deskew &amp; Filters
+                    <SlidersHorizontal className="w-4 h-4 text-red-500" /> 2. Image Deskew &amp; Filters
                   </h3>
-                  <span className="text-xs text-amber-500 cursor-pointer hover:underline" onClick={() => setParams({ brightness: 0, contrast: 0, rotation: 0, denoise: 1, edgeDetect: false, sharpness: 20 })}>
+                  <span className="text-xs text-red-500 cursor-pointer hover:underline" onClick={() => setParams({ brightness: 0, contrast: 0, rotation: 0, denoise: 1, edgeDetect: false, sharpness: 20 })}>
                     Reset
                   </span>
                 </div>
@@ -733,7 +733,7 @@ export default function App() {
                   <div>
                     <div className="flex justify-between text-xs mb-1">
                       <span className="text-stone-300 font-medium">Rotation / Alignment Deskew</span>
-                      <span className="font-mono text-amber-400 font-semibold">{params.rotation}°</span>
+                      <span className="font-mono text-red-500 font-semibold">{params.rotation}°</span>
                     </div>
                     <p className="text-[10px] text-stone-500 mb-2">Align warp threads vertically and weft threads horizontally.</p>
                     <div className="flex gap-2 items-center">
@@ -744,7 +744,7 @@ export default function App() {
                         step="0.5"
                         value={params.rotation}
                         onChange={(e) => setParams({ ...params, rotation: parseFloat(e.target.value) })}
-                        className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                        className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600"
                       />
                     </div>
                     <div className="flex justify-between text-[10px] text-stone-600 mt-1">
@@ -754,7 +754,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Brightness */}
+                   {/* Brightness */}
                   <div>
                     <div className="flex justify-between text-xs mb-1">
                       <span className="text-stone-300 font-medium">Brightness Correction</span>
@@ -766,7 +766,7 @@ export default function App() {
                       max="50"
                       value={params.brightness}
                       onChange={(e) => setParams({ ...params, brightness: parseInt(e.target.value) })}
-                      className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                      className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600"
                     />
                   </div>
 
@@ -783,7 +783,7 @@ export default function App() {
                       max="70"
                       value={params.contrast}
                       onChange={(e) => setParams({ ...params, contrast: parseInt(e.target.value) })}
-                      className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                      className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600"
                     />
                   </div>
                 </div>
@@ -793,7 +793,7 @@ export default function App() {
               <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 space-y-4 shadow-md">
                 <div className="flex items-center justify-between border-b border-stone-800 pb-3">
                   <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
-                    <Grid className="w-4 h-4 text-amber-500" /> 3. Yarn Palette Snapping
+                    <Grid className="w-4 h-4 text-red-500" /> 3. Yarn Palette Snapping
                   </h3>
                   <span className="text-[10px] bg-stone-850 text-stone-300 px-1.5 py-0.5 rounded font-mono">
                     {yarns.length} Colors Active
@@ -820,7 +820,7 @@ export default function App() {
                           <div className="font-semibold text-white flex items-center gap-1.5">
                             {yarn.name}
                             {yarn.isMetallic && (
-                              <span className="text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1 rounded font-mono flex items-center gap-0.5">
+                              <span className="text-[9px] bg-red-500/20 text-red-300 border border-red-500/30 px-1 rounded font-mono flex items-center gap-0.5">
                                 <Sparkle className="w-2.5 h-2.5" /> Lurex
                               </span>
                             )}
@@ -877,18 +877,18 @@ export default function App() {
 
                   <div className="flex items-center justify-between pt-1">
                     <label className="flex items-center gap-1.5 text-xs text-stone-300 cursor-pointer">
-                      <input
+                       <input
                         type="checkbox"
                         checked={newYarnIsMetallic}
                         onChange={(e) => setNewYarnIsMetallic(e.target.checked)}
-                        className="rounded accent-amber-500 bg-stone-800 border-stone-700"
+                        className="rounded accent-red-600 bg-stone-800 border-stone-700"
                       />
                       <span>Shiny / Metallic Yarn</span>
                     </label>
 
                     <button
                       type="submit"
-                      className="bg-amber-500 hover:bg-amber-400 text-stone-950 px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition"
+                      className="bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition"
                     >
                       <Plus className="w-3.5 h-3.5" /> Save Yarn
                     </button>
@@ -906,7 +906,7 @@ export default function App() {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-800 pb-3">
                   <div className="space-y-0.5">
                     <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
-                      <Eye className="w-4 h-4 text-amber-500" /> Interactive Digital Thread Inspector
+                      <Eye className="w-4 h-4 text-red-500" /> Interactive Digital Thread Inspector
                     </h3>
                     <p className="text-xs text-stone-400">
                       Hovering Synchronizes pixel coords. Scroll or select Zoom to inspect micro weft picks.
@@ -1003,7 +1003,7 @@ export default function App() {
                           type="checkbox"
                           checked={showGridOverlay}
                           onChange={(e) => setShowGridOverlay(e.target.checked)}
-                          className="rounded bg-stone-850 border-stone-700 text-amber-500 accent-amber-500 size-3"
+                          className="rounded bg-stone-850 border-stone-700 text-red-500 accent-red-500 size-3"
                         />
                         <span>Loom Grid Overlay</span>
                       </label>
@@ -1057,7 +1057,7 @@ export default function App() {
                   <div>
                     {hoveredCell ? (
                       <span className="font-mono text-white">
-                        Current Loom Point: <strong className="text-amber-500">Warp End {hoveredCell.x + 1}</strong>, <strong className="text-amber-500">Weft Pick {hoveredCell.y + 1}</strong>
+                        Current Loom Point: <strong className="text-red-500">Warp End {hoveredCell.x + 1}</strong>, <strong className="text-red-500">Weft Pick {hoveredCell.y + 1}</strong>
                       </span>
                     ) : (
                       <span className="text-stone-500 italic">Hover mouse cursor over weave cells to inspect points</span>
@@ -1076,7 +1076,7 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => exportLosslessImage(false)}
-                      className="bg-amber-500 hover:bg-amber-400 text-stone-950 px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
+                      className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
                     >
                       <Download className="w-3.5 h-3.5" /> Download MÜCAD Background (1:1 Pixels PNG)
                     </button>
@@ -1098,7 +1098,7 @@ export default function App() {
               <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 shadow-lg space-y-4">
                 <div className="flex items-center justify-between border-b border-stone-800 pb-3">
                   <div className="flex items-center gap-2">
-                    <Sparkles className="w-5 h-5 text-amber-500" />
+                    <Sparkles className="w-5 h-5 text-red-500" />
                     <div>
                       <h4 className="text-sm font-semibold text-white uppercase">
                         AI Label Analysis Assistant
@@ -1112,7 +1112,7 @@ export default function App() {
                   <button
                     onClick={runCloudAnalysis}
                     disabled={analyzing}
-                    className="bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-stone-950 px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
+                    className="bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
                   >
                     {analyzing ? (
                       <>
@@ -1130,17 +1130,17 @@ export default function App() {
                   <div className="space-y-4 text-xs">
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                       <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg">
-                        <span className="text-[10px] font-mono text-amber-500 uppercase">Estimated Weave Type</span>
+                        <span className="text-[10px] font-mono text-red-500 uppercase">Estimated Weave Type</span>
                         <p className="text-sm font-bold text-white mt-0.5">{analysisResult.weaveType}</p>
                       </div>
                       <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg">
-                        <span className="text-[10px] font-mono text-amber-500 uppercase">Suggested Dimensions</span>
+                        <span className="text-[10px] font-mono text-red-500 uppercase">Suggested Dimensions</span>
                         <p className="text-sm font-bold text-white mt-0.5">
                           {analysisResult.estimatedWidthMm}mm × {analysisResult.estimatedHeightMm}mm
                         </p>
                       </div>
                       <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg">
-                        <span className="text-[10px] font-mono text-amber-500 uppercase">Estimated Warp x Weft</span>
+                        <span className="text-[10px] font-mono text-red-500 uppercase">Estimated Warp x Weft</span>
                         <p className="text-sm font-bold text-white mt-0.5">
                           {analysisResult.estimatedWarpDensity} ends × {analysisResult.estimatedWeftDensity} picks
                         </p>
@@ -1148,7 +1148,7 @@ export default function App() {
                     </div>
 
                     <div className="bg-stone-900 border border-stone-800 p-3.5 rounded-lg space-y-2">
-                      <span className="text-[10px] font-mono text-amber-500 uppercase tracking-wide block">
+                      <span className="text-[10px] font-mono text-red-500 uppercase tracking-wide block">
                         Professional MÜCAD Loom Programming Advice:
                       </span>
                       <ul className="space-y-1.5 pl-4 list-disc text-stone-300">
@@ -1160,7 +1160,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="bg-stone-900 border border-stone-800 p-4 rounded-lg flex items-center gap-3.5 text-xs text-stone-400">
-                    <Info className="w-5 h-5 text-amber-500 shrink-0" />
+                    <Info className="w-5 h-5 text-red-500 shrink-0" />
                     <div>
                       <p className="font-semibold text-stone-300">AI Thread Analysis Available</p>
                       <p className="text-[11px] text-stone-400 mt-0.5">
@@ -1179,7 +1179,7 @@ export default function App() {
         {/* Info & Learning workflow section at the bottom */}
         <section id="instructions" className="bg-stone-950 border border-stone-800 rounded-xl p-6 space-y-4 shadow-xl">
           <div className="flex items-center gap-2 border-b border-stone-800 pb-3">
-            <Info className="w-5 h-5 text-amber-500" />
+            <Info className="w-5 h-5 text-red-500" />
             <h3 className="text-sm font-semibold text-white uppercase tracking-wider">
               Designer Reference &amp; MÜCAD Integration Guide
             </h3>
@@ -1188,7 +1188,7 @@ export default function App() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-stone-300">
             <div className="space-y-2">
               <h4 className="font-bold text-white flex items-center gap-1">
-                <span className="text-amber-500">01.</span> Setup Loom Density
+                <span className="text-red-500">01.</span> Setup Loom Density
               </h4>
               <p className="text-stone-400 leading-relaxed">
                 Before uploading, measure the physical label with calipers to get exact length and width in millimeters. Refer to your Jakob Müller machine layout card for the active Warp (ends/cm) and Weft (picks/cm) density specs. Enter these values into the first box.
@@ -1196,7 +1196,7 @@ export default function App() {
             </div>
             <div className="space-y-2">
               <h4 className="font-bold text-white flex items-center gap-1">
-                <span className="text-amber-500">02.</span> Align and Snap
+                <span className="text-red-500">02.</span> Align and Snap
               </h4>
               <p className="text-stone-400 leading-relaxed">
                 Rotate the scanned fabric using the deskew slider until individual threads are oriented strictly vertical and horizontal. The applet will resample the image into a pixel matrix matching the thread count, snapping colors to your selected yarn palette.
@@ -1204,7 +1204,7 @@ export default function App() {
             </div>
             <div className="space-y-2">
               <h4 className="font-bold text-white flex items-center gap-1">
-                <span className="text-amber-500">03.</span> Export &amp; Trace
+                <span className="text-red-500">03.</span> Export &amp; Trace
               </h4>
               <p className="text-stone-400 leading-relaxed">
                 Download the 1:1 pixel PNG reference map. Because it lacks blurry borders and contains only solid index colors, you can set it directly as the background tracing template layer in your MÜCAD Basic/Mini workspace. No more manual magnifying glass guesswork!
