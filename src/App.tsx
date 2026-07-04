@@ -23,10 +23,9 @@ import { YarnColor, ImageParams, TechSpecs, AnalysisResult } from "./types";
 import { snapToPalette } from "./utils/color";
 
 const DEFAULT_YARNS: YarnColor[] = [
-  { id: "1", hex: "#0c0a09", name: "Ground Charcoal", role: "Background (Warp)", isMetallic: false },
-  { id: "2", hex: "#f5f5f4", name: "Weft White", role: "Primary Text / Artwork", isMetallic: false },
-  { id: "3", hex: "#dc2626", name: "Satin Red Accent", role: "Secondary Branding", isMetallic: false },
-  { id: "4", hex: "#eab308", name: "Gold Lurex", role: "Metallic Border Highlight", isMetallic: true },
+  { id: "1", hex: "#ff0000", name: "Red", role: "Background Pattern", isMetallic: false },
+  { id: "2", hex: "#ffffff", name: "White", role: "Gear symbol & Müller text", isMetallic: false },
+  { id: "3", hex: "#000000", name: "Black", role: "Structure/Border", isMetallic: false },
 ];
 
 export default function App() {
@@ -488,49 +487,61 @@ export default function App() {
                 <div className="flex flex-wrap items-center justify-center gap-3">
                   <button
                     onClick={() => {
-                      // Generate dummy physical-like woven texture
+                      // Generate dummy physical-like woven texture matching MÜCAD theme
                       const canvas = document.createElement("canvas");
                       canvas.width = 400;
                       canvas.height = 150;
                       const ctx = canvas.getContext("2d");
                       if (ctx) {
-                        // Background charcoal texture
-                        ctx.fillStyle = "#1e1b18";
+                        // Background pattern: Pure Red
+                        ctx.fillStyle = "#ff0000";
                         ctx.fillRect(0, 0, 400, 150);
                         
-                        // Weave subtle scan noise lines
-                        ctx.fillStyle = "#2a241f";
+                        // Weave subtle scan noise lines (darker red/blackish lines)
+                        ctx.fillStyle = "rgba(0, 0, 0, 0.12)";
                         for (let i = 0; i < 400; i += 4) {
                           ctx.fillRect(i, 0, 2, 150);
                         }
                         for (let j = 0; j < 150; j += 4) {
-                          ctx.fillStyle = "rgba(255,255,255,0.03)";
+                          ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
                           ctx.fillRect(0, j, 400, 2);
                         }
 
-                        // Gold label border (highly reflective)
-                        ctx.fillStyle = "#facc15"; // gold base
-                        ctx.fillRect(10, 10, 380, 8);
-                        ctx.fillRect(10, 132, 380, 8);
+                        // Black border structure
+                        ctx.fillStyle = "#000000";
+                        ctx.fillRect(10, 10, 380, 6);
+                        ctx.fillRect(10, 134, 380, 6);
 
-                        // Specular shine highlights over the gold border
-                        const grad = ctx.createLinearGradient(0, 0, 400, 0);
-                        grad.addColorStop(0, "rgba(255,255,255,0)");
-                        grad.addColorStop(0.3, "rgba(255,255,255,0.65)"); // reflective sheen
-                        grad.addColorStop(0.4, "rgba(255,255,255,0)");
-                        ctx.fillStyle = grad;
-                        ctx.fillRect(10, 10, 380, 130);
+                        // Draw gear symbol in White (#ffffff)
+                        ctx.fillStyle = "#ffffff";
+                        ctx.strokeStyle = "#ffffff";
+                        ctx.lineWidth = 3;
+                        ctx.beginPath();
+                        ctx.arc(55, 75, 18, 0, Math.PI * 2);
+                        ctx.stroke();
+                        // Draw gear teeth
+                        for (let a = 0; a < Math.PI * 2; a += Math.PI / 4) {
+                          ctx.beginPath();
+                          ctx.moveTo(55 + Math.cos(a) * 16, 75 + Math.sin(a) * 16);
+                          ctx.lineTo(55 + Math.cos(a) * 24, 75 + Math.sin(a) * 24);
+                          ctx.stroke();
+                        }
+                        // Inner circle of gear
+                        ctx.beginPath();
+                        ctx.arc(55, 75, 8, 0, Math.PI * 2);
+                        ctx.fill();
 
-                        // Brand text block ("Müller Weft") with blurred edges to simulate scan defocus
-                        ctx.fillStyle = "#fafaf9";
-                        ctx.font = "bold 22px serif";
-                        ctx.fillText("M Müller", 45, 60);
-                        ctx.font = "italic 13px sans-serif";
-                        ctx.fillStyle = "#ef4444"; // red subtext
-                        ctx.fillText("Fine Weave Tech", 45, 82);
+                        // Müller text block in White (#ffffff)
+                        ctx.fillStyle = "#ffffff";
+                        ctx.font = "bold 24px 'Space Grotesk', sans-serif";
+                        ctx.fillText("Müller Weaving", 95, 74);
+                        
+                        ctx.font = "italic 11px 'JetBrains Mono', monospace";
+                        ctx.fillStyle = "#000000"; // Black subtext/accent
+                        ctx.fillText("J. Müller AG Companion Design", 95, 96);
 
                         // Simulate scanner blur
-                        ctx.filter = "blur(1.5px)";
+                        ctx.filter = "blur(1.2px)";
                         ctx.drawImage(canvas, 0, 0);
                       }
                       setImageSrc(canvas.toDataURL());
