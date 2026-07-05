@@ -17,10 +17,13 @@ import {
   Sliders,
   Sparkle,
   SlidersHorizontal,
-  HelpCircle
+  HelpCircle,
+  Paintbrush,
+  Eraser,
+  FileSpreadsheet
 } from "lucide-react";
 import { YarnColor, ImageParams, TechSpecs, AnalysisResult } from "./types";
-import { snapToPalette } from "./utils/color";
+import { snapToPalette, rgbToLab, hexToLab, getDeltaE76 } from "./utils/color";
 
 const DEFAULT_YARNS: YarnColor[] = [
   { id: "1", hex: "#ff0000", name: "Red", role: "Background Pattern", isMetallic: false },
@@ -32,6 +35,7 @@ export default function App() {
   // State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [loadedImage, setLoadedImage] = useState<HTMLImageElement | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
 
@@ -71,6 +75,26 @@ export default function App() {
   
   // Interactive coordinate synchronization
   const [hoveredCell, setHoveredCell] = useState<{ x: number; y: number } | null>(null);
+
+  // Manual Loom Painting Overrides
+  const [isPaintMode, setIsPaintMode] = useState<boolean>(false);
+  const [selectedPaintColor, setSelectedPaintColor] = useState<string>("");
+  const [manualEdits, setManualEdits] = useState<Record<string, string>>({});
+  const [isDrawing, setIsDrawing] = useState<boolean>(false);
+  const [brushSize, setBrushSize] = useState<number>(1);
+  const [isAutoAligning, setIsAutoAligning] = useState<boolean>(false);
+
+  // Initialize selected paint color to first yarn color
+  useEffect(() => {
+    if (yarns.length > 0 && !selectedPaintColor) {
+      setSelectedPaintColor(yarns[0].hex);
+    }
+  }, [yarns]);
+
+  // Reset manual edits if resolution changes to prevent alignment mismatch
+  useEffect(() => {
+    setManualEdits({});
+  }, [targetWidthPx, targetHeightPx, imageSrc]);
 
   // Canvas Refs
   const originalCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -145,16 +169,25 @@ export default function App() {
     }
   };
 
-  // Re-render and apply image pre-processing to original-size hidden canvas, then compute pixelated grid
+  // 1. Asynchronously load imageSrc into loadedImage state
   useEffect(() => {
-    if (!imageSrc) return;
+    if (!imageSrc) {
+      setLoadedImage(null);
+      return;
+    }
     const img = new Image();
     img.src = imageSrc;
     img.onload = () => {
-      sourceImageRef.current = img;
-      renderProcessedOriginal();
+      setLoadedImage(img);
     };
-  }, [imageSrc, params, specs, yarns]);
+  }, [imageSrc]);
+
+  // 2. Render whenever loadedImage, params, specs, yarns, or manualEdits change
+  useEffect(() => {
+    if (!loadedImage) return;
+    sourceImageRef.current = loadedImage;
+    renderProcessedOriginal();
+  }, [loadedImage, params, specs, yarns, manualEdits]);
 
   // Render the pre-processed canvas
   const renderProcessedOriginal = () => {
@@ -274,10 +307,16 @@ export default function App() {
         const avgB = count > 0 ? sumB / count : 255;
 
         // Snap average to designer yarn palette using CIELAB CIE76
-        const { hex } = snapToPalette(avgR, avgG, avgB, yarns);
+        let snappedHex = snapToPalette(avgR, avgG, avgB, yarns).hex;
+
+        // Apply manual pixel overrides from correction brush
+        const coordKey = `${gx},${gy}`;
+        if (manualEdits[coordKey]) {
+          snappedHex = manualEdits[coordKey];
+        }
 
         // Convert matched hex to RGB and write to grid pixel
-        const hexVal = hex.replace("#", "");
+        const hexVal = snappedHex.replace("#", "");
         const matchedR = parseInt(hexVal.substring(0, 2), 16) || 0;
         const matchedG = parseInt(hexVal.substring(2, 4), 16) || 0;
         const matchedB = parseInt(hexVal.substring(4, 6), 16) || 0;
@@ -319,6 +358,230 @@ export default function App() {
 
   const handleMouseLeave = () => {
     setHoveredCell(null);
+  };
+
+  // Get the physical scanned color of a particular grid cell from the pre-processed original canvas
+  const getCellAverageColor = (gx: number, gy: number) => {
+    const origCanvas = originalCanvasRef.current;
+    if (!origCanvas) return null;
+    const ctx = origCanvas.getContext("2d");
+    if (!ctx) return null;
+
+    const cellW = origCanvas.width / targetWidthPx;
+    const cellH = origCanvas.height / targetHeightPx;
+    const startX = Math.floor(gx * cellW);
+    const startY = Math.floor(gy * cellH);
+    const endX = Math.min(origCanvas.width, Math.floor((gx + 1) * cellW));
+    const endY = Math.min(origCanvas.height, Math.floor((gy + 1) * cellH));
+
+    try {
+      const imgData = ctx.getImageData(startX, startY, Math.max(1, endX - startX), Math.max(1, endY - startY));
+      const d = imgData.data;
+      let r = 0, g = 0, b = 0, count = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        r += d[i];
+        g += d[i + 1];
+        b += d[i + 2];
+        count++;
+      }
+      if (count > 0) {
+        return { r: Math.round(r / count), g: Math.round(g / count), b: Math.round(b / count) };
+      }
+    } catch (e) {
+      // Return null on canvas errors
+    }
+    return null;
+  };
+
+  // Paint a specific coordinate, expanding according to brushSize
+  const applyPaintAtCell = (cellX: number, cellY: number) => {
+    if (!selectedPaintColor) return;
+    setManualEdits((prev) => {
+      const newEdits = { ...prev };
+      const radius = Math.floor(brushSize / 2);
+      const startX = Math.max(0, cellX - radius);
+      const endX = Math.min(targetWidthPx - 1, cellX + radius + (brushSize % 2 === 0 ? 1 : 0));
+      const startY = Math.max(0, cellY - radius);
+      const endY = Math.min(targetHeightPx - 1, cellY + radius + (brushSize % 2 === 0 ? 1 : 0));
+
+      for (let x = startX; x <= endX; x++) {
+        for (let y = startY; y <= endY; y++) {
+          const key = `${x},${y}`;
+          if (selectedPaintColor === "eraser") {
+            delete newEdits[key];
+          } else {
+            newEdits[key] = selectedPaintColor;
+          }
+        }
+      }
+      return newEdits;
+    });
+  };
+
+  // Handle click & drag manual edits on the grid canvas
+  const handleGridMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isPaintMode) return;
+    setIsDrawing(true);
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const cellX = Math.floor((x / rect.width) * targetWidthPx);
+    const cellY = Math.floor((y / rect.height) * targetHeightPx);
+    if (cellX >= 0 && cellX < targetWidthPx && cellY >= 0 && cellY < targetHeightPx) {
+      applyPaintAtCell(cellX, cellY);
+    }
+  };
+
+  const handleGridMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    handleMouseMove(e, true);
+    if (!isPaintMode || !isDrawing) return;
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const cellX = Math.floor((x / rect.width) * targetWidthPx);
+    const cellY = Math.floor((y / rect.height) * targetHeightPx);
+    if (cellX >= 0 && cellX < targetWidthPx && cellY >= 0 && cellY < targetHeightPx) {
+      applyPaintAtCell(cellX, cellY);
+    }
+  };
+
+  const handleGridMouseUp = () => {
+    setIsDrawing(false);
+  };
+
+  // Automates rotation deskew by scanning image variance at small rotational steps
+  const autoAlignImage = () => {
+    const img = sourceImageRef.current;
+    if (!img) return;
+    setIsAutoAligning(true);
+
+    setTimeout(() => {
+      const canvas = document.createElement("canvas");
+      // Scale down image for ultra-fast contrast evaluation
+      const scale = Math.min(1, 200 / Math.max(img.width, img.height));
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        setIsAutoAligning(false);
+        return;
+      }
+
+      let bestAngle = 0;
+      let maxVariance = -1;
+
+      // Scan angles with a step of 0.5 degrees
+      for (let angle = -15; angle <= 15; angle += 0.5) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((angle * Math.PI) / 180);
+        ctx.drawImage(img, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+        ctx.restore();
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = imgData.data;
+
+        // Row projection variance (for weft threads)
+        const rowSums = new Float32Array(canvas.height);
+        for (let y = 0; y < canvas.height; y++) {
+          let sum = 0;
+          for (let x = 0; x < canvas.width; x++) {
+            const idx = (y * canvas.width + x) * 4;
+            sum += (d[idx] + d[idx + 1] + d[idx + 2]) / 3;
+          }
+          rowSums[y] = sum / canvas.width;
+        }
+
+        let rowMean = 0;
+        for (let y = 0; y < canvas.height; y++) rowMean += rowSums[y];
+        rowMean /= canvas.height;
+
+        let rowVar = 0;
+        for (let y = 0; y < canvas.height; y++) {
+          const diff = rowSums[y] - rowMean;
+          rowVar += diff * diff;
+        }
+
+        // Column projection variance (for warp threads)
+        const colSums = new Float32Array(canvas.width);
+        for (let x = 0; x < canvas.width; x++) {
+          let sum = 0;
+          for (let y = 0; y < canvas.height; y++) {
+            const idx = (y * canvas.width + x) * 4;
+            sum += (d[idx] + d[idx + 1] + d[idx + 2]) / 3;
+          }
+          colSums[x] = sum / canvas.height;
+        }
+
+        let colMean = 0;
+        for (let x = 0; x < canvas.width; x++) colMean += colSums[x];
+        colMean /= canvas.width;
+
+        let colVar = 0;
+        for (let x = 0; x < canvas.width; x++) {
+          const diff = colSums[x] - colMean;
+          colVar += diff * diff;
+        }
+
+        const totalVariance = rowVar + colVar;
+        if (totalVariance > maxVariance) {
+          maxVariance = totalVariance;
+          bestAngle = angle;
+        }
+      }
+
+      setParams((p) => ({ ...p, rotation: bestAngle }));
+      setIsAutoAligning(false);
+    }, 50);
+  };
+
+  // Export raw loom indices as an industrial CSV pattern format
+  const exportLoomMatrixCSV = () => {
+    let csvContent = "data:text/csv;charset=utf-8,";
+    const gridCanvas = gridCanvasRef.current;
+    if (!gridCanvas) return;
+    const ctx = gridCanvas.getContext("2d");
+    if (!ctx) return;
+
+    const imgData = ctx.getImageData(0, 0, targetWidthPx, targetHeightPx);
+    const d = imgData.data;
+
+    // Create lookup table of hex to palette index
+    const colorToIndex: Record<string, number> = {};
+    yarns.forEach((y, idx) => {
+      colorToIndex[y.hex.toLowerCase()] = idx;
+    });
+
+    const rows: string[] = [];
+    for (let y = 0; y < targetHeightPx; y++) {
+      const rowVals: number[] = [];
+      for (let x = 0; x < targetWidthPx; x++) {
+        const idx = (y * targetWidthPx + x) * 4;
+        const r = d[idx];
+        const g = d[idx + 1];
+        const b = d[idx + 2];
+        const hex = "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1).toLowerCase();
+
+        let matchedIdx = colorToIndex[hex];
+        if (matchedIdx === undefined) {
+          matchedIdx = snapToPalette(r, g, b, yarns).index;
+        }
+        rowVals.push(matchedIdx);
+      }
+      rows.push(rowVals.join(","));
+    }
+
+    csvContent += rows.join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.href = encodedUri;
+    link.download = `woven-label-pattern-matrix-${targetWidthPx}x${targetHeightPx}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   // Add customized yarn to palette
@@ -428,6 +691,7 @@ export default function App() {
             <button
               onClick={() => {
                 setImageSrc(null);
+                setLoadedImage(null);
                 setSelectedFile(null);
                 setAnalysisResult(null);
               }}
@@ -744,8 +1008,24 @@ export default function App() {
                         step="0.5"
                         value={params.rotation}
                         onChange={(e) => setParams({ ...params, rotation: parseFloat(e.target.value) })}
-                        className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600"
+                        className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600 flex-grow"
                       />
+                      <button
+                        onClick={autoAlignImage}
+                        disabled={isAutoAligning}
+                        className="text-[10px] bg-red-600 hover:bg-red-700 disabled:bg-stone-800 disabled:text-stone-500 text-white font-semibold py-1 px-2 rounded shrink-0 transition flex items-center gap-1 shadow-sm"
+                        title="Analyze weave patterns to align warp and weft threads automatically"
+                      >
+                        {isAutoAligning ? (
+                          <>
+                            <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Aligning...
+                          </>
+                        ) : (
+                          <>
+                            <RotateCw className="w-2.5 h-2.5" /> Auto Deskew
+                          </>
+                        )}
+                      </button>
                     </div>
                     <div className="flex justify-between text-[10px] text-stone-600 mt-1">
                       <span>-45°</span>
@@ -902,196 +1182,339 @@ export default function App() {
             <div className="lg:col-span-8 space-y-6">
               
               {/* Box 4: Interactive Live Comparison View */}
-              <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 shadow-lg space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-800 pb-3">
-                  <div className="space-y-0.5">
-                    <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
-                      <Eye className="w-4 h-4 text-red-500" /> Interactive Digital Thread Inspector
-                    </h3>
-                    <p className="text-xs text-stone-400">
-                      Hovering Synchronizes pixel coords. Scroll or select Zoom to inspect micro weft picks.
-                    </p>
-                  </div>
+              <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 shadow-lg space-y-4 animate-fade-in">
+                {(() => {
+                  const avgColor = hoveredCell ? getCellAverageColor(hoveredCell.x, hoveredCell.y) : null;
+                  let snappedYarnHex = "";
+                  let snappedYarnName = "Unknown";
+                  let distDeltaE = "";
 
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="flex items-center bg-stone-900 border border-stone-800 rounded-lg p-0.5">
-                      <button
-                        onClick={() => setShowOriginalInComparison(true)}
-                        className={`text-xs px-2.5 py-1 rounded-md transition font-medium ${showOriginalInComparison ? "bg-stone-800 text-white" : "text-stone-400 hover:text-white"}`}
-                      >
-                        Side-by-Side
-                      </button>
-                      <button
-                        onClick={() => setShowOriginalInComparison(false)}
-                        className={`text-xs px-2.5 py-1 rounded-md transition font-medium ${!showOriginalInComparison ? "bg-stone-800 text-white" : "text-stone-400 hover:text-white"}`}
-                      >
-                        Loom Output Only
-                      </button>
-                    </div>
+                  if (hoveredCell && avgColor) {
+                    const snap = snapToPalette(avgColor.r, avgColor.g, avgColor.b, yarns);
+                    const coordKey = `${hoveredCell.x},${hoveredCell.y}`;
+                    const hexToUse = manualEdits[coordKey] || snap.hex;
 
-                    <div className="flex items-center gap-1.5 text-xs text-stone-400">
-                      <span>Zoom:</span>
-                      <select
-                        value={zoomLevel}
-                        onChange={(e) => setZoomLevel(parseInt(e.target.value))}
-                        className="bg-stone-900 border border-stone-800 rounded text-stone-200 px-2 py-1 outline-none text-xs"
-                      >
-                        <option value="1">1x (A4 layout)</option>
-                        <option value="2">2x</option>
-                        <option value="4">4x (Macro)</option>
-                        <option value="6">6x</option>
-                        <option value="8">8x (Micro Thread)</option>
-                        <option value="12">12x (Deep Inspect)</option>
-                      </select>
-                    </div>
-                  </div>
-                </div>
+                    snappedYarnHex = hexToUse;
+                    const yarnMatch = yarns.find(y => y.hex.toLowerCase() === hexToUse.toLowerCase());
+                    snappedYarnName = yarnMatch ? yarnMatch.name : "Custom Override";
 
-                {/* Render Canvases */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-                  
-                  {/* Left canvas: Pre-processed Original */}
-                  {showOriginalInComparison && (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-stone-300 font-semibold flex items-center gap-1">
-                          <span className="w-2 h-2 rounded-full bg-amber-500 block animate-pulse" />
-                          Processed Physical Scan Source
-                        </span>
-                        <span className="text-[10px] text-stone-500 font-mono">Auto-cropped / Rotated</span>
+                    const lab1 = rgbToLab(avgColor.r, avgColor.g, avgColor.b);
+                    const lab2 = hexToLab(hexToUse);
+                    distDeltaE = getDeltaE76(lab1, lab2).toFixed(1);
+                  }
+
+                  return (
+                    <>
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-800 pb-3">
+                        <div className="space-y-0.5">
+                          <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
+                            <Eye className="w-4 h-4 text-red-500" /> Interactive Digital Thread Inspector
+                          </h3>
+                          <p className="text-xs text-stone-400">
+                            Hovering Synchronizes pixel coords. Scroll or select Zoom to inspect micro weft picks.
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-3">
+                          <div className="flex items-center bg-stone-900 border border-stone-800 rounded-lg p-0.5">
+                            <button
+                              onClick={() => setShowOriginalInComparison(true)}
+                              className={`text-xs px-2.5 py-1 rounded-md transition font-medium ${showOriginalInComparison ? "bg-stone-800 text-white" : "text-stone-400 hover:text-white"}`}
+                            >
+                              Side-by-Side
+                            </button>
+                            <button
+                              onClick={() => setShowOriginalInComparison(false)}
+                              className={`text-xs px-2.5 py-1 rounded-md transition font-medium ${!showOriginalInComparison ? "bg-stone-800 text-white" : "text-stone-400 hover:text-white"}`}
+                            >
+                              Loom Output Only
+                            </button>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 text-xs text-stone-400">
+                            <span>Zoom:</span>
+                            <select
+                              value={zoomLevel}
+                              onChange={(e) => setZoomLevel(parseInt(e.target.value))}
+                              className="bg-stone-900 border border-stone-800 rounded text-stone-200 px-2 py-1 outline-none text-xs"
+                            >
+                              <option value="1">1x (A4 layout)</option>
+                              <option value="2">2x</option>
+                              <option value="4">4x (Macro)</option>
+                              <option value="6">6x</option>
+                              <option value="8">8x (Micro Thread)</option>
+                              <option value="12">12x (Deep Inspect)</option>
+                            </select>
+                          </div>
+                        </div>
                       </div>
-                      
-                      <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] relative p-4 flex items-center justify-center min-h-[220px]">
-                        {/* Hidden Source Canvas that retains the actual rotated resolution */}
-                        <canvas
-                          ref={originalCanvasRef}
-                          onMouseMove={(e) => handleMouseMove(e, false)}
-                          onMouseLeave={handleMouseLeave}
-                          className="max-w-full cursor-crosshair rounded shadow-lg select-none"
-                          style={{
-                            width: `${targetWidthPx * zoomLevel}px`,
-                            height: `${targetHeightPx * zoomLevel}px`,
-                            imageRendering: "pixelated",
-                          }}
-                        />
 
-                        {/* Synced Cursor Hover Box Overlay */}
-                        {hoveredCell && (
-                          <div
-                            className="absolute border border-red-500 pointer-events-none"
-                            style={{
-                              width: `${zoomLevel}px`,
-                              height: `${zoomLevel}px`,
-                              left: `calc(50% - ${(targetWidthPx * zoomLevel) / 2}px + ${hoveredCell.x * zoomLevel}px + 16px)`,
-                              top: `calc(50% - ${(targetHeightPx * zoomLevel) / 2}px + ${hoveredCell.y * zoomLevel}px + 16px)`,
-                            }}
-                          />
+                      {/* Paint/Correction Mode Toolset */}
+                      <div className="bg-stone-900 border border-stone-800 rounded-lg p-3 flex flex-wrap items-center justify-between gap-4">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <button
+                            onClick={() => setIsPaintMode(!isPaintMode)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+                              isPaintMode ? "bg-red-600 text-white shadow-md shadow-red-600/20" : "bg-stone-800 hover:bg-stone-750 text-stone-300 hover:text-white"
+                            }`}
+                          >
+                            <Paintbrush className="w-3.5 h-3.5" />
+                            {isPaintMode ? "Drawing / Correction Active" : "Enable Manual Correction Brush"}
+                          </button>
+
+                          {isPaintMode && (
+                            <div className="flex flex-wrap items-center gap-4 border-l border-stone-800 pl-3">
+                              <div className="flex items-center gap-1.5 text-xs text-stone-300">
+                                <span className="text-[11px] text-stone-400">Brush Color:</span>
+                                <div className="flex items-center gap-1">
+                                  {yarns.map((yarn) => (
+                                    <button
+                                      key={yarn.id}
+                                      onClick={() => setSelectedPaintColor(yarn.hex)}
+                                      className={`w-5 h-5 rounded-full border transition-all ${
+                                        selectedPaintColor === yarn.hex ? "scale-125 border-white ring-2 ring-red-500/50" : "border-stone-700 hover:scale-110"
+                                      }`}
+                                      style={{ backgroundColor: yarn.hex }}
+                                      title={`Paint ${yarn.name}`}
+                                    />
+                                  ))}
+                                  <button
+                                    onClick={() => setSelectedPaintColor("eraser")}
+                                    className={`text-[10px] px-2 py-0.5 rounded border flex items-center gap-1 font-semibold transition-all ${
+                                      selectedPaintColor === "eraser" ? "bg-white text-stone-950 border-white" : "border-stone-700 text-stone-400 hover:text-stone-200"
+                                    }`}
+                                    title="Eraser (restores automatic CIELAB snap)"
+                                  >
+                                    <Eraser className="w-3 h-3" /> Auto Snap
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 text-xs text-stone-400 border-l border-stone-800 pl-3">
+                                <span className="text-[11px]">Brush Size:</span>
+                                <select
+                                  value={brushSize}
+                                  onChange={(e) => setBrushSize(parseInt(e.target.value))}
+                                  className="bg-stone-950 border border-stone-800 text-stone-200 rounded px-1.5 py-0.5 outline-none text-xs font-mono font-bold"
+                                >
+                                  <option value="1">1x1 Cell</option>
+                                  <option value="2">2x2 Cells</option>
+                                  <option value="3">3x3 Cells</option>
+                                </select>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {Object.keys(manualEdits).length > 0 && (
+                          <button
+                            onClick={() => setManualEdits({})}
+                            className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1 transition"
+                            title="Clear all manual paint edits and restore standard automatic snaps"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" /> Clear Edits ({Object.keys(manualEdits).length})
+                          </button>
                         )}
                       </div>
-                    </div>
-                  )}
 
-                  {/* Right Canvas: Thread-Accurate Grid */}
-                  <div className={`space-y-2 ${!showOriginalInComparison ? "md:col-span-2" : ""}`}>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-stone-300 font-semibold flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-green-500 block" />
-                        Thread-Accurate Digital Reference Image
-                      </span>
-                      <label className="flex items-center gap-1 text-[10px] text-stone-400 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={showGridOverlay}
-                          onChange={(e) => setShowGridOverlay(e.target.checked)}
-                          className="rounded bg-stone-850 border-stone-700 text-red-500 accent-red-500 size-3"
-                        />
-                        <span>Loom Grid Overlay</span>
-                      </label>
-                    </div>
+                      {/* Render Canvases */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                        
+                        {/* Left canvas: Pre-processed Original */}
+                        <div className={`space-y-2 ${showOriginalInComparison ? "block" : "hidden"}`}>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-stone-300 font-semibold flex items-center gap-1">
+                              <span className="w-2 h-2 rounded-full bg-amber-500 block animate-pulse" />
+                              Processed Physical Scan Source
+                            </span>
+                            <span className="text-[10px] text-stone-500 font-mono">Auto-cropped / Rotated</span>
+                          </div>
+                          
+                          <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] relative p-4 flex items-center justify-center min-h-[220px]">
+                            {/* Hidden Source Canvas that retains the actual rotated resolution */}
+                            <canvas
+                              ref={originalCanvasRef}
+                              onMouseMove={(e) => handleMouseMove(e, false)}
+                              onMouseLeave={handleMouseLeave}
+                              className="max-w-full cursor-crosshair rounded shadow-lg select-none"
+                              style={{
+                                width: `${targetWidthPx * zoomLevel}px`,
+                                height: `${targetHeightPx * zoomLevel}px`,
+                                imageRendering: "pixelated",
+                              }}
+                            />
 
-                    <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] relative p-4 flex items-center justify-center min-h-[220px]">
-                      <canvas
-                        ref={gridCanvasRef}
-                        onMouseMove={(e) => handleMouseMove(e, true)}
-                        onMouseLeave={handleMouseLeave}
-                        className="max-w-full cursor-crosshair rounded shadow-lg select-none"
-                        style={{
-                          width: `${targetWidthPx * zoomLevel}px`,
-                          height: `${targetHeightPx * zoomLevel}px`,
-                          imageRendering: "pixelated",
-                        }}
-                      />
+                            {/* Synced Cursor Hover Box Overlay */}
+                            {hoveredCell && (
+                              <div
+                                className="absolute border border-red-500 pointer-events-none"
+                                style={{
+                                  width: `${zoomLevel}px`,
+                                  height: `${zoomLevel}px`,
+                                  left: `calc(50% - ${(targetWidthPx * zoomLevel) / 2}px + ${hoveredCell.x * zoomLevel}px + 16px)`,
+                                  top: `calc(50% - ${(targetHeightPx * zoomLevel) / 2}px + ${hoveredCell.y * zoomLevel}px + 16px)`,
+                                }}
+                              />
+                            )}
+                          </div>
+                        </div>
 
-                      {/* Render simulated loom wire grid overlay using pure HTML borders over the top if enabled */}
-                      {showGridOverlay && (
-                        <div
-                          className="absolute pointer-events-none"
-                          style={{
-                            width: `${targetWidthPx * zoomLevel}px`,
-                            height: `${targetHeightPx * zoomLevel}px`,
-                            backgroundImage: `linear-gradient(to right, rgba(100, 116, 139, 0.25) 1px, transparent 1px),
-                                              linear-gradient(to bottom, rgba(100, 116, 139, 0.25) 1px, transparent 1px)`,
-                            backgroundSize: `${zoomLevel}px ${zoomLevel}px`,
-                          }}
-                        />
-                      )}
+                        {/* Right Canvas: Thread-Accurate Grid */}
+                        <div className={`space-y-2 ${!showOriginalInComparison ? "md:col-span-2" : ""}`}>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-stone-300 font-semibold flex items-center gap-1">
+                              <span className="w-2 h-2 rounded-full bg-green-500 block" />
+                              Thread-Accurate Digital Reference Image
+                            </span>
+                            <label className="flex items-center gap-1 text-[10px] text-stone-400 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={showGridOverlay}
+                                onChange={(e) => setShowGridOverlay(e.target.checked)}
+                                className="rounded bg-stone-850 border-stone-700 text-red-500 accent-red-500 size-3"
+                              />
+                              <span>Loom Grid Overlay</span>
+                            </label>
+                          </div>
 
-                      {/* Hover Overlay cell details */}
-                      {hoveredCell && (
-                        <div
-                          className="absolute border border-green-400 pointer-events-none"
-                          style={{
-                            width: `${zoomLevel}px`,
-                            height: `${zoomLevel}px`,
-                            left: `calc(50% - ${(targetWidthPx * zoomLevel) / 2}px + ${hoveredCell.x * zoomLevel}px + 16px)`,
-                            top: `calc(50% - ${(targetHeightPx * zoomLevel) / 2}px + ${hoveredCell.y * zoomLevel}px + 16px)`,
-                          }}
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
+                          <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] relative p-4 flex items-center justify-center min-h-[220px]">
+                            <canvas
+                              ref={gridCanvasRef}
+                              onMouseDown={handleGridMouseDown}
+                              onMouseMove={handleGridMouseMove}
+                              onMouseUp={handleGridMouseUp}
+                              onMouseLeave={() => {
+                                handleMouseLeave();
+                                handleGridMouseUp();
+                              }}
+                              className={`max-w-full rounded shadow-lg select-none transition-all ${isPaintMode ? "cursor-cell ring-2 ring-red-500/50" : "cursor-crosshair"}`}
+                              style={{
+                                width: `${targetWidthPx * zoomLevel}px`,
+                                height: `${targetHeightPx * zoomLevel}px`,
+                                imageRendering: "pixelated",
+                              }}
+                            />
 
-                {/* Coordinate synchronization readout */}
-                <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg flex flex-wrap justify-between items-center text-xs text-stone-300">
-                  <div>
-                    {hoveredCell ? (
-                      <span className="font-mono text-white">
-                        Current Loom Point: <strong className="text-red-500">Warp End {hoveredCell.x + 1}</strong>, <strong className="text-red-500">Weft Pick {hoveredCell.y + 1}</strong>
-                      </span>
-                    ) : (
-                      <span className="text-stone-500 italic">Hover mouse cursor over weave cells to inspect points</span>
-                    )}
-                  </div>
+                            {/* Render simulated loom wire grid overlay using pure HTML borders over the top if enabled */}
+                            {showGridOverlay && (
+                              <div
+                                className="absolute pointer-events-none"
+                                style={{
+                                  width: `${targetWidthPx * zoomLevel}px`,
+                                  height: `${targetHeightPx * zoomLevel}px`,
+                                  backgroundImage: `linear-gradient(to right, rgba(100, 116, 139, 0.25) 1px, transparent 1px),
+                                                    linear-gradient(to bottom, rgba(100, 116, 139, 0.25) 1px, transparent 1px)`,
+                                  backgroundSize: `${zoomLevel}px ${zoomLevel}px`,
+                                }}
+                              />
+                            )}
 
-                  <div className="flex gap-2">
-                    <span className="font-mono text-[10px] text-stone-500">
-                      W: {targetWidthPx} ends x H: {targetHeightPx} picks
-                    </span>
-                  </div>
-                </div>
+                            {/* Hover Overlay cell details */}
+                            {hoveredCell && (
+                              <div
+                                className="absolute border border-green-400 pointer-events-none"
+                                style={{
+                                  width: `${zoomLevel}px`,
+                                  height: `${zoomLevel}px`,
+                                  left: `calc(50% - ${(targetWidthPx * zoomLevel) / 2}px + ${hoveredCell.x * zoomLevel}px + 16px)`,
+                                  top: `calc(50% - ${(targetHeightPx * zoomLevel) / 2}px + ${hoveredCell.y * zoomLevel}px + 16px)`,
+                                }}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      </div>
 
-                {/* Exporters and quick save buttons */}
-                <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-stone-800">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={() => exportLosslessImage(false)}
-                      className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
-                    >
-                      <Download className="w-3.5 h-3.5" /> Download MÜCAD Background (1:1 Pixels PNG)
-                    </button>
-                    <button
-                      onClick={() => exportLosslessImage(true)}
-                      className="bg-stone-800 hover:bg-stone-750 text-white px-3 py-1.5 rounded-lg text-xs font-medium border border-stone-700 flex items-center gap-1.5 transition"
-                    >
-                      <Download className="w-3.5 h-3.5 text-stone-400" /> Export Magnified Technical Sheet
-                    </button>
-                  </div>
+                      {/* Coordinate synchronization readout */}
+                      <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs text-stone-300">
+                        <div className="space-y-1">
+                          {hoveredCell ? (
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                              <span className="font-mono text-white">
+                                Loom Point: <strong className="text-red-500">Warp End {hoveredCell.x + 1}</strong>, <strong className="text-red-500">Weft Pick {hoveredCell.y + 1}</strong>
+                              </span>
+                              
+                              {/* Manual override status badge */}
+                              {manualEdits[`${hoveredCell.x},${hoveredCell.y}`] && (
+                                <span className="bg-red-500/10 text-red-400 border border-red-500/20 px-1.5 py-0.5 rounded text-[10px] font-mono">
+                                  ✍️ Manually Edited
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-stone-500 italic">Hover mouse cursor over weave cells to inspect points</span>
+                          )}
 
-                  <div className="text-stone-500 text-[10px] italic">
-                    PNG files export with lossless palette-indexing.
-                  </div>
-                </div>
+                          {hoveredCell && avgColor && (
+                            <div className="flex flex-wrap items-center gap-3 text-[11px] pt-1">
+                              <div className="flex items-center gap-1.5 bg-stone-950 px-2 py-1 rounded border border-stone-800">
+                                <span className="text-stone-400">Scanned:</span>
+                                <span className="w-3.5 h-3.5 rounded-sm border border-stone-750" style={{ backgroundColor: `rgb(${avgColor.r}, ${avgColor.g}, ${avgColor.b})` }} />
+                                <span className="font-mono text-stone-300">rgb({avgColor.r},{avgColor.g},{avgColor.b})</span>
+                              </div>
+                              <span className="text-stone-600">➔</span>
+                              <div className="flex items-center gap-1.5 bg-stone-950 px-2 py-1 rounded border border-stone-800">
+                                <span className="text-stone-400">Snapped Yarn:</span>
+                                <span className="w-3.5 h-3.5 rounded-sm border border-stone-750" style={{ backgroundColor: snappedYarnHex }} />
+                                <span className="text-stone-200 font-semibold">{snappedYarnName}</span>
+                                <span className="font-mono text-stone-500">({snappedYarnHex})</span>
+                              </div>
+                              
+                              <div className="flex items-center gap-1 bg-stone-950 px-2 py-1 rounded border border-stone-800">
+                                <span className="text-stone-400">Color Distance:</span>
+                                <span className="font-mono font-bold text-white">ΔE {distDeltaE}</span>
+                                {parseFloat(distDeltaE) < 2.0 ? (
+                                  <span className="text-[10px] text-green-400 bg-green-500/10 px-1 rounded">Excellent Match</span>
+                                ) : parseFloat(distDeltaE) < 5.0 ? (
+                                  <span className="text-[10px] text-yellow-400 bg-yellow-500/10 px-1 rounded">Good Match</span>
+                                ) : (
+                                  <span className="text-[10px] text-amber-500 bg-amber-500/10 px-1 rounded font-medium">Loose Fit</span>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex gap-2 shrink-0 md:self-end">
+                          <span className="font-mono text-[10px] text-stone-500 bg-stone-950 border border-stone-850 px-2 py-1 rounded">
+                            W: {targetWidthPx} ends x H: {targetHeightPx} picks
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Exporters and quick save buttons */}
+                      <div className="flex flex-wrap items-center justify-between gap-4 pt-3 border-t border-stone-800">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => exportLosslessImage(false)}
+                            className="bg-red-600 hover:bg-red-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
+                          >
+                            <Download className="w-3.5 h-3.5" /> Download MÜCAD Background (1:1 Pixels PNG)
+                          </button>
+                          
+                          <button
+                            onClick={() => exportLosslessImage(true)}
+                            className="bg-stone-800 hover:bg-stone-750 text-white px-3 py-1.5 rounded-lg text-xs font-medium border border-stone-700 flex items-center gap-1.5 transition"
+                          >
+                            <Download className="w-3.5 h-3.5 text-stone-400" /> Export Magnified Technical Sheet
+                          </button>
+
+                          <button
+                            onClick={exportLoomMatrixCSV}
+                            className="bg-stone-800 hover:bg-stone-750 text-white px-3 py-1.5 rounded-lg text-xs font-medium border border-stone-700 flex items-center gap-1.5 transition"
+                            title="Download the full grid matrix as a CSV file of yarn indices for loom programming"
+                          >
+                            <FileSpreadsheet className="w-3.5 h-3.5 text-stone-400" /> Export Pattern Indices (CSV)
+                          </button>
+                        </div>
+
+                        <div className="text-stone-500 text-[10px] italic">
+                          PNG exports lossless indexed backgrounds. CSV exports warp/weft matrices.
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
               {/* Box 5: Gemini scan analyzer card */}
