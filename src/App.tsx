@@ -35,7 +35,21 @@ export default function App() {
   // State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [rawImageSrc, setRawImageSrc] = useState<string | null>(null);
+  const [cropConfirmed, setCropConfirmed] = useState<boolean>(false);
+  const [cropRotation, setCropRotation] = useState<number>(0);
+  const [cropLeft, setCropLeft] = useState<number>(0);
+  const [cropRight, setCropRight] = useState<number>(0);
+  const [cropTop, setCropTop] = useState<number>(0);
+  const [cropBottom, setCropBottom] = useState<number>(0);
+  const [cornerTL, setCornerTL] = useState<{ x: number; y: number }>({ x: 10, y: 10 });
+  const [cornerTR, setCornerTR] = useState<{ x: number; y: number }>({ x: 90, y: 10 });
+  const [cornerBR, setCornerBR] = useState<{ x: number; y: number }>({ x: 90, y: 90 });
+  const [cornerBL, setCornerBL] = useState<{ x: number; y: number }>({ x: 10, y: 90 });
+  const [activeHandle, setActiveHandle] = useState<"tl" | "tr" | "br" | "bl" | null>(null);
+  const [rawLoadedImage, setRawLoadedImage] = useState<HTMLImageElement | null>(null);
   const [loadedImage, setLoadedImage] = useState<HTMLImageElement | null>(null);
+  const [originalDimensions, setOriginalDimensions] = useState<{ width: number; height: number } | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
 
@@ -109,7 +123,17 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = (event) => {
         if (event.target?.result) {
-          setImageSrc(event.target.result as string);
+          setRawImageSrc(event.target.result as string);
+          setCropConfirmed(false);
+          setCropRotation(0);
+          setCropLeft(0);
+          setCropRight(0);
+          setCropTop(0);
+          setCropBottom(0);
+          setCornerTL({ x: 10, y: 10 });
+          setCornerTR({ x: 90, y: 10 });
+          setCornerBR({ x: 90, y: 90 });
+          setCornerBL({ x: 10, y: 90 });
         }
       };
       reader.readAsDataURL(file);
@@ -169,18 +193,559 @@ export default function App() {
     }
   };
 
+  // Automatically detect background and text colors from cropped label image
+  const autoDetectColors = (img: HTMLImageElement) => {
+    try {
+      const canvas = document.createElement("canvas");
+      // Scale down for lightning-fast analysis
+      const maxDim = 120;
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = imgData.data;
+
+      // Map color groups (by quantizing 8-bit RGB channels to bins of 16)
+      const colorMap: Record<string, { r: number; g: number; b: number; count: number }> = {};
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] < 200) continue; // skip transparent/semi-transparent
+        const r = d[i];
+        const g = d[i + 1];
+        const b = d[i + 2];
+        
+        const qr = Math.floor(r / 16) * 16 + 8;
+        const qg = Math.floor(g / 16) * 16 + 8;
+        const qb = Math.floor(b / 16) * 16 + 8;
+        const key = `${qr},${qg},${qb}`;
+        
+        if (!colorMap[key]) {
+          colorMap[key] = { r, g, b, count: 0 };
+        }
+        colorMap[key].count++;
+      }
+
+      const sortedColors = Object.values(colorMap).sort((a, b) => b.count - a.count);
+
+      if (sortedColors.length >= 2) {
+        // Most common quantized color is our background color
+        const bg = sortedColors[0];
+        
+        // Find a high-contrast foreground (text/pattern) color
+        let textColor = sortedColors[1];
+        let maxDist = 0;
+        
+        // Search the top 12 most frequent colors to find a high-contrast match
+        for (let i = 1; i < Math.min(sortedColors.length, 12); i++) {
+          const c = sortedColors[i];
+          const dist = Math.pow(c.r - bg.r, 2) + Math.pow(c.g - bg.g, 2) + Math.pow(c.b - bg.b, 2);
+          if (dist > maxDist && dist > 12000) {
+            maxDist = dist;
+            textColor = c;
+          }
+        }
+
+        // Try to find a third accent color that differs significantly from both
+        let accentColor = sortedColors[2] || sortedColors[1];
+        let maxAccentDist = 0;
+        for (let i = 1; i < Math.min(sortedColors.length, 20); i++) {
+          const c = sortedColors[i];
+          if (c === textColor || c === bg) continue;
+          const distToBg = Math.pow(c.r - bg.r, 2) + Math.pow(c.g - bg.g, 2) + Math.pow(c.b - bg.b, 2);
+          const distToText = Math.pow(c.r - textColor.r, 2) + Math.pow(c.g - textColor.g, 2) + Math.pow(c.b - textColor.b, 2);
+          if (distToBg > 8000 && distToText > 8000 && distToBg + distToText > maxAccentDist) {
+            maxAccentDist = distToBg + distToText;
+            accentColor = c;
+          }
+        }
+
+        const componentToHex = (c: number) => {
+          const hex = Math.max(0, Math.min(255, Math.round(c))).toString(16);
+          return hex.length === 1 ? "0" + hex : hex;
+        };
+        const rgbToHex = (r: number, g: number, b: number) => {
+          return "#" + componentToHex(r) + componentToHex(g) + componentToHex(b);
+        };
+
+        const bgHex = rgbToHex(bg.r, bg.g, bg.b);
+        const textHex = rgbToHex(textColor.r, textColor.g, textColor.b);
+        const accentHex = rgbToHex(accentColor.r, accentColor.g, accentColor.b);
+
+        const detectedYarns: YarnColor[] = [
+          { id: "1", hex: bgHex, name: "Scanned Background", role: "Auto Background", isMetallic: false },
+          { id: "2", hex: textHex, name: "Scanned Text", role: "Auto Foreground Text/Pattern", isMetallic: false },
+        ];
+
+        // If there's a third distinct color, add it as an accent
+        const finalAccentDistToBg = Math.pow(accentColor.r - bg.r, 2) + Math.pow(accentColor.g - bg.g, 2) + Math.pow(accentColor.b - bg.b, 2);
+        if (finalAccentDistToBg > 9000 && accentHex !== textHex && accentHex !== bgHex) {
+          detectedYarns.push({ id: "3", hex: accentHex, name: "Scanned Accent", role: "Auto Secondary Accent", isMetallic: false });
+        } else {
+          // Fallback to a clear neutral/black/white if we only had 2 main colors
+          const neutralHex = bgHex.toLowerCase() === "#ffffff" ? "#000000" : "#ffffff";
+          detectedYarns.push({ id: "3", hex: neutralHex, name: "Neutral Accent", role: "Structure/Border", isMetallic: false });
+        }
+
+        setYarns(detectedYarns);
+        setSelectedPaintColor(detectedYarns[0].hex);
+      }
+    } catch (e) {
+      console.error("Error auto-detecting color palette:", e);
+    }
+  };
+
   // 1. Asynchronously load imageSrc into loadedImage state
   useEffect(() => {
     if (!imageSrc) {
       setLoadedImage(null);
+      setOriginalDimensions(null);
       return;
     }
     const img = new Image();
     img.src = imageSrc;
     img.onload = () => {
       setLoadedImage(img);
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      setOriginalDimensions({ width: w, height: h });
+      
+      // Default specs to match original image dimensions exactly
+      setSpecs({
+        widthMm: w / 10,
+        heightMm: h / 10,
+        warpDensity: 100,
+        weftDensity: 100,
+      });
+
+      // Automatically extract background and text colors from cropped label image
+      autoDetectColors(img);
     };
   }, [imageSrc]);
+
+  const cropPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // 1b. Asynchronously load rawImageSrc into rawLoadedImage state
+  useEffect(() => {
+    if (!rawImageSrc) {
+      setRawLoadedImage(null);
+      return;
+    }
+    const img = new Image();
+    img.src = rawImageSrc;
+    img.onload = () => {
+      setRawLoadedImage(img);
+    };
+  }, [rawImageSrc]);
+
+  // 1c. Redraw crop preview whenever rawLoadedImage, cropRotation, or corner pins change
+  useEffect(() => {
+    const canvas = cropPreviewCanvasRef.current;
+    const img = rawLoadedImage;
+    if (!canvas || !img) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const rad = (cropRotation * Math.PI) / 180;
+    const absCos = Math.abs(Math.cos(rad));
+    const absSin = Math.abs(Math.sin(rad));
+    const rotatedW = Math.round(img.width * absCos + img.height * absSin);
+    const rotatedH = Math.round(img.width * absSin + img.height * absCos);
+
+    canvas.width = rotatedW;
+    canvas.height = rotatedH;
+
+    // Draw rotated image
+    ctx.clearRect(0, 0, rotatedW, rotatedH);
+    ctx.save();
+    ctx.translate(rotatedW / 2, rotatedH / 2);
+    ctx.rotate(rad);
+    ctx.drawImage(img, -img.width / 2, -img.height / 2);
+    ctx.restore();
+
+    // Map percentage corners to absolute pixels on the rotated canvas
+    const p0 = { x: (cornerTL.x / 100) * rotatedW, y: (cornerTL.y / 100) * rotatedH };
+    const p1 = { x: (cornerTR.x / 100) * rotatedW, y: (cornerTR.y / 100) * rotatedH };
+    const p2 = { x: (cornerBR.x / 100) * rotatedW, y: (cornerBR.y / 100) * rotatedH };
+    const p3 = { x: (cornerBL.x / 100) * rotatedW, y: (cornerBL.y / 100) * rotatedH };
+
+    // 1. Draw Semi-transparent outer mask
+    ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+    ctx.beginPath();
+    // Outer rect (clockwise)
+    ctx.moveTo(0, 0);
+    ctx.lineTo(rotatedW, 0);
+    ctx.lineTo(rotatedW, rotatedH);
+    ctx.lineTo(0, rotatedH);
+    ctx.closePath();
+
+    // Inner quad (counter-clockwise) to carve out the window
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(p3.x, p3.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.lineTo(p1.x, p1.y);
+    ctx.closePath();
+
+    ctx.fill();
+
+    // 2. Draw outer boundary of the perspective quad (red with white outline glow)
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+    ctx.lineWidth = Math.max(4, Math.round(rotatedW / 200));
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.lineTo(p3.x, p3.y);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.strokeStyle = "#ef4444"; // high-contrast tailwind red-500
+    ctx.lineWidth = Math.max(2, Math.round(rotatedW / 400));
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.lineTo(p3.x, p3.y);
+    ctx.closePath();
+    ctx.stroke();
+
+    // 3. Draw Perspective-aligned guiding grid inside the quad
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+    ctx.lineWidth = Math.max(1, Math.round(rotatedW / 800));
+    ctx.beginPath();
+    
+    // Vertical grid lines
+    const gridCols = 12;
+    for (let i = 1; i < gridCols; i++) {
+      const u = i / gridCols;
+      const tx = p0.x + (p1.x - p0.x) * u;
+      const ty = p0.y + (p1.y - p0.y) * u;
+      const bx = p3.x + (p2.x - p3.x) * u;
+      const by = p3.y + (p2.y - p3.y) * u;
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(bx, by);
+    }
+    
+    // Horizontal grid lines
+    const gridRows = 8;
+    for (let j = 1; j < gridRows; j++) {
+      const v = j / gridRows;
+      const lx = p0.x + (p3.x - p0.x) * v;
+      const ly = p0.y + (p3.y - p0.y) * v;
+      const rx = p1.x + (p2.x - p1.x) * v;
+      const ry = p1.y + (p2.y - p1.y) * v;
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(rx, ry);
+    }
+    ctx.stroke();
+
+    // 4. Draw interactive visual markers for corners on the canvas
+    const drawCornerMarker = (pt: { x: number; y: number }) => {
+      const radius = Math.max(7, Math.round(rotatedW / 100));
+      ctx.fillStyle = "#ef4444";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, radius, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, radius / 2, 0, 2 * Math.PI);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+    };
+
+    drawCornerMarker(p0);
+    drawCornerMarker(p1);
+    drawCornerMarker(p2);
+    drawCornerMarker(p3);
+
+  }, [rawLoadedImage, cropRotation, cornerTL, cornerTR, cornerBR, cornerBL]);
+
+  const handleConfirmCrop = () => {
+    const img = rawLoadedImage;
+    if (!img) return;
+
+    const rad = (cropRotation * Math.PI) / 180;
+    const absCos = Math.abs(Math.cos(rad));
+    const absSin = Math.abs(Math.sin(rad));
+    const rotatedW = Math.round(img.width * absCos + img.height * absSin);
+    const rotatedH = Math.round(img.width * absSin + img.height * absCos);
+
+    const rotCanvas = document.createElement("canvas");
+    rotCanvas.width = rotatedW;
+    rotCanvas.height = rotatedH;
+    const rotCtx = rotCanvas.getContext("2d");
+    if (!rotCtx) return;
+
+    rotCtx.translate(rotatedW / 2, rotatedH / 2);
+    rotCtx.rotate(rad);
+    rotCtx.drawImage(img, -img.width / 2, -img.height / 2);
+    rotCtx.rotate(-rad);
+    rotCtx.translate(-rotatedW / 2, -rotatedH / 2);
+
+    // Compute absolute pixel coordinates for the 4 corners on the rotated image
+    const p0 = { x: (cornerTL.x / 100) * rotatedW, y: (cornerTL.y / 100) * rotatedH };
+    const p1 = { x: (cornerTR.x / 100) * rotatedW, y: (cornerTR.y / 100) * rotatedH };
+    const p2 = { x: (cornerBR.x / 100) * rotatedW, y: (cornerBR.y / 100) * rotatedH };
+    const p3 = { x: (cornerBL.x / 100) * rotatedW, y: (cornerBL.y / 100) * rotatedH };
+
+    // Estimate target width and height of the warped rectangle (rectified label)
+    const widthTop = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+    const widthBottom = Math.hypot(p2.x - p3.x, p2.y - p3.y);
+    const cropW = Math.max(10, Math.round((widthTop + widthBottom) / 2));
+
+    const heightLeft = Math.hypot(p3.x - p0.x, p3.y - p0.y);
+    const heightRight = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const cropH = Math.max(10, Math.round((heightLeft + heightRight) / 2));
+
+    const cropCanvas = document.createElement("canvas");
+    cropCanvas.width = cropW;
+    cropCanvas.height = cropH;
+    const cropCtx = cropCanvas.getContext("2d");
+    if (!cropCtx) return;
+
+    // Get source image data for bilinear projection
+    const rotImgData = rotCtx.getImageData(0, 0, rotatedW, rotatedH);
+    const rotData = rotImgData.data;
+
+    const cropImgData = cropCtx.createImageData(cropW, cropH);
+    const cropData = cropImgData.data;
+
+    // Backward bilinear mapping for perspective & warp correction
+    for (let dy = 0; dy < cropH; dy++) {
+      const v = dy / (cropH - 1 || 1);
+      for (let dx = 0; dx < cropW; dx++) {
+        const u = dx / (cropW - 1 || 1);
+
+        // Bilinear interpolation formula
+        const sx = (1 - u) * (1 - v) * p0.x + u * (1 - v) * p1.x + u * v * p2.x + (1 - u) * v * p3.x;
+        const sy = (1 - u) * (1 - v) * p0.y + u * (1 - v) * p1.y + u * v * p2.y + (1 - u) * v * p3.y;
+
+        // Bilinear interpolation from 4 neighboring pixels for high-quality antialiasing
+        const xL = Math.floor(sx);
+        const xR = Math.min(rotatedW - 1, xL + 1);
+        const yT = Math.floor(sy);
+        const yB = Math.min(rotatedH - 1, yT + 1);
+
+        const weightX = sx - xL;
+        const weightY = sy - yT;
+
+        const idxTL = (yT * rotatedW + xL) * 4;
+        const idxTR = (yT * rotatedW + xR) * 4;
+        const idxBL = (yB * rotatedW + xL) * 4;
+        const idxBR = (yB * rotatedW + xR) * 4;
+
+        const dstIdx = (dy * cropW + dx) * 4;
+
+        if (xL >= 0 && xL < rotatedW && yT >= 0 && yT < rotatedH) {
+          // Bilinear blend of red, green, blue channels
+          for (let channel = 0; channel < 4; channel++) {
+            const valTL = rotData[idxTL + channel];
+            const valTR = rotData[idxTR + channel];
+            const valBL = rotData[idxBL + channel];
+            const valBR = rotData[idxBR + channel];
+
+            const valTop = valTL + weightX * (valTR - valTL);
+            const valBottom = valBL + weightX * (valBR - valBL);
+            const blendedVal = valTop + weightY * (valBottom - valTop);
+
+            cropData[dstIdx + channel] = blendedVal;
+          }
+        } else {
+          // Default fallback color (pure white)
+          cropData[dstIdx] = 255;
+          cropData[dstIdx + 1] = 255;
+          cropData[dstIdx + 2] = 255;
+          cropData[dstIdx + 3] = 255;
+        }
+      }
+    }
+
+    cropCtx.putImageData(cropImgData, 0, 0);
+
+    const croppedDataUrl = cropCanvas.toDataURL("image/png");
+    setImageSrc(croppedDataUrl);
+    setCropConfirmed(true);
+  };
+
+  // Smart auto-detection of perspective distortion & label contour quad boundaries
+  const autoDetectLabelQuad = () => {
+    const img = rawLoadedImage;
+    if (!img) return;
+
+    try {
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(1, 300 / Math.max(img.width, img.height));
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = imgData.data;
+      const w = canvas.width;
+      const h = canvas.height;
+
+      // 1. Grayscale conversion
+      const gray = new Uint8Array(w * h);
+      for (let i = 0; i < d.length; i += 4) {
+        gray[i / 4] = Math.round(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
+      }
+
+      // 2. Compute edge intensity gradients (Sobel filter approximation)
+      const edges = new Uint8Array(w * h);
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const idx = y * w + x;
+          const gx = gray[idx + 1] - gray[idx - 1];
+          const gy = gray[idx + w] - gray[idx - w];
+          edges[idx] = Math.min(255, Math.sqrt(gx * gx + gy * gy));
+        }
+      }
+
+      // 3. Scan along diagonals from each corner inwards to find high contrast boundaries
+      const cx = w / 2;
+      const cy = h / 2;
+
+      const findEdgeOnLine = (startX: number, startY: number, endX: number, endY: number) => {
+        const steps = 120;
+        for (let i = 0; i < steps; i++) {
+          const t = i / steps;
+          const x = Math.round(startX + (endX - startX) * t);
+          const y = Math.round(startY + (endY - startY) * t);
+          if (x < 0 || x >= w || y < 0 || y >= h) continue;
+          
+          const idx = y * w + x;
+          // Look for sudden gradient spikes indicative of a label's border or contrast shift
+          if (edges[idx] > 30) {
+            // Return percentage coordinate
+            return { x: (x / w) * 100, y: (y / h) * 100 };
+          }
+        }
+        return null;
+      };
+
+      // Query from 5% inset to avoid border scanner noise
+      const tl = findEdgeOnLine(w * 0.05, h * 0.05, cx, cy) || { x: 12, y: 12 };
+      const tr = findEdgeOnLine(w * 0.95, h * 0.05, cx, cy) || { x: 88, y: 12 };
+      const br = findEdgeOnLine(w * 0.95, h * 0.95, cx, cy) || { x: 88, y: 88 };
+      const bl = findEdgeOnLine(w * 0.05, h * 0.95, cx, cy) || { x: 12, y: 88 };
+
+      // Ensure reasonable bounds to avoid collapse
+      if (Math.abs(tr.x - tl.x) > 15 && Math.abs(br.y - tr.y) > 15) {
+        setCornerTL(tl);
+        setCornerTR(tr);
+        setCornerBR(br);
+        setCornerBL(bl);
+      } else {
+        // Fallback to generous margins
+        setCornerTL({ x: 10, y: 10 });
+        setCornerTR({ x: 90, y: 10 });
+        setCornerBR({ x: 90, y: 90 });
+        setCornerBL({ x: 10, y: 90 });
+      }
+    } catch (err) {
+      console.error("Label contour detection failed:", err);
+    }
+  };
+
+  // Trigger automatic contour-detection and straighten once raw image loads
+  useEffect(() => {
+    if (rawLoadedImage) {
+      autoDetectLabelQuad();
+    }
+  }, [rawLoadedImage]);
+
+  const autoAlignRaw = () => {
+    const img = rawLoadedImage;
+    if (!img) return;
+    setIsAutoAligning(true);
+
+    setTimeout(() => {
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(1, 200 / Math.max(img.width, img.height));
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        setIsAutoAligning(false);
+        return;
+      }
+
+      let bestAngle = 0;
+      let maxVariance = -1;
+
+      // Scan angles with a step of 0.5 degrees
+      for (let angle = -15; angle <= 15; angle += 0.5) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((angle * Math.PI) / 180);
+        ctx.drawImage(img, -canvas.width / 2, -canvas.height / 2, canvas.width, canvas.height);
+        ctx.restore();
+
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = imgData.data;
+
+        // Row projection variance (for weft threads)
+        const rowSums = new Float32Array(canvas.height);
+        for (let y = 0; y < canvas.height; y++) {
+          let sum = 0;
+          for (let x = 0; x < canvas.width; x++) {
+            const idx = (y * canvas.width + x) * 4;
+            sum += (d[idx] + d[idx + 1] + d[idx + 2]) / 3;
+          }
+          rowSums[y] = sum / canvas.width;
+        }
+
+        let rowMean = 0;
+        for (let y = 0; y < canvas.height; y++) rowMean += rowSums[y];
+        rowMean /= canvas.height;
+
+        let rowVar = 0;
+        for (let y = 0; y < canvas.height; y++) {
+          const diff = rowSums[y] - rowMean;
+          rowVar += diff * diff;
+        }
+
+        // Column projection variance (for warp threads)
+        const colSums = new Float32Array(canvas.width);
+        for (let x = 0; x < canvas.width; x++) {
+          let sum = 0;
+          for (let y = 0; y < canvas.height; y++) {
+            const idx = (y * canvas.width + x) * 4;
+            sum += (d[idx] + d[idx + 1] + d[idx + 2]) / 3;
+          }
+          colSums[x] = sum / canvas.height;
+        }
+
+        let colMean = 0;
+        for (let x = 0; x < canvas.width; x++) colMean += colSums[x];
+        colMean /= canvas.width;
+
+        let colVar = 0;
+        for (let x = 0; x < canvas.width; x++) {
+          const diff = colSums[x] - colMean;
+          colVar += diff * diff;
+        }
+
+        const totalVariance = rowVar + colVar;
+        if (totalVariance > maxVariance) {
+          maxVariance = totalVariance;
+          bestAngle = angle;
+        }
+      }
+
+      setCropRotation(bestAngle);
+      setIsAutoAligning(false);
+    }, 50);
+  };
 
   // 2. Render whenever loadedImage, params, specs, yarns, or manualEdits change
   useEffect(() => {
@@ -665,6 +1230,52 @@ export default function App() {
     document.body.removeChild(link);
   };
 
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = cropPreviewCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+    // Find the closest handle within 15% distance
+    const distTL = Math.hypot(x - cornerTL.x, y - cornerTL.y);
+    const distTR = Math.hypot(x - cornerTR.x, y - cornerTR.y);
+    const distBR = Math.hypot(x - cornerBR.x, y - cornerBR.y);
+    const distBL = Math.hypot(x - cornerBL.x, y - cornerBL.y);
+
+    const minDist = Math.min(distTL, distTR, distBR, distBL);
+    if (minDist < 15) {
+      if (minDist === distTL) setActiveHandle("tl");
+      else if (minDist === distTR) setActiveHandle("tr");
+      else if (minDist === distBR) setActiveHandle("br");
+      else if (minDist === distBL) setActiveHandle("bl");
+      canvas.setPointerCapture(e.pointerId);
+    }
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!activeHandle) return;
+    const canvas = cropPreviewCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+
+    if (activeHandle === "tl") setCornerTL({ x, y });
+    else if (activeHandle === "tr") setCornerTR({ x, y });
+    else if (activeHandle === "br") setCornerBR({ x, y });
+    else if (activeHandle === "bl") setCornerBL({ x, y });
+  };
+
+  const handleCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!activeHandle) return;
+    const canvas = cropPreviewCanvasRef.current;
+    if (canvas) {
+      canvas.releasePointerCapture(e.pointerId);
+    }
+    setActiveHandle(null);
+  };
+
   return (
     <div className="min-h-screen bg-stone-900 text-stone-100 font-sans selection:bg-[#ff0000] selection:text-white">
       {/* Header Banner */}
@@ -692,8 +1303,10 @@ export default function App() {
               onClick={() => {
                 setImageSrc(null);
                 setLoadedImage(null);
+                setOriginalDimensions(null);
                 setSelectedFile(null);
                 setAnalysisResult(null);
+                setRawImageSrc(null);
               }}
               className="text-xs text-stone-400 hover:text-white px-3 py-1.5 rounded-md border border-stone-800 hover:bg-stone-900 transition flex items-center gap-1.5"
             >
@@ -711,7 +1324,7 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto p-6 space-y-6">
         {/* Main Workspace split */}
-        {!imageSrc ? (
+        {!rawImageSrc ? (
           /* Empty State: Initial Upload Zone */
           <div className="max-w-3xl mx-auto py-12">
             <div className="text-center space-y-6">
@@ -728,6 +1341,31 @@ export default function App() {
               {/* Drag Drop Area */}
               <div
                 onClick={triggerUpload}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                    const file = e.dataTransfer.files[0];
+                    setSelectedFile(file);
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                      if (event.target?.result) {
+                        setRawImageSrc(event.target.result as string);
+                        setCropConfirmed(false);
+                        setCropRotation(0);
+                        setCropLeft(0);
+                        setCropRight(0);
+                        setCropTop(0);
+                        setCropBottom(0);
+                        setCornerTL({ x: 10, y: 10 });
+                        setCornerTR({ x: 90, y: 10 });
+                        setCornerBR({ x: 90, y: 90 });
+                        setCornerBL({ x: 10, y: 90 });
+                      }
+                    };
+                    reader.readAsDataURL(file);
+                  }
+                }}
                 className="border-2 border-dashed border-stone-700 hover:border-red-500 hover:bg-stone-950/40 rounded-xl p-10 cursor-pointer transition-all duration-200 bg-stone-950/20 space-y-4"
               >
                 <input
@@ -808,7 +1446,13 @@ export default function App() {
                         ctx.filter = "blur(1.2px)";
                         ctx.drawImage(canvas, 0, 0);
                       }
-                      setImageSrc(canvas.toDataURL());
+                      setRawImageSrc(canvas.toDataURL());
+                      setCropConfirmed(false);
+                      setCropRotation(0);
+                      setCornerTL({ x: 10, y: 10 });
+                      setCornerTR({ x: 90, y: 10 });
+                      setCornerBR({ x: 90, y: 90 });
+                      setCornerBL({ x: 10, y: 90 });
                       setSpecs({
                         widthMm: 50,
                         heightMm: 20,
@@ -863,7 +1507,13 @@ export default function App() {
                         ctx.filter = "blur(1.2px)";
                         ctx.drawImage(canvas, 0, 0);
                       }
-                      setImageSrc(canvas.toDataURL());
+                      setRawImageSrc(canvas.toDataURL());
+                      setCropConfirmed(false);
+                      setCropRotation(0);
+                      setCornerTL({ x: 10, y: 10 });
+                      setCornerTR({ x: 90, y: 10 });
+                      setCornerBR({ x: 90, y: 90 });
+                      setCornerBL({ x: 10, y: 90 });
                       setSpecs({
                         widthMm: 30,
                         heightMm: 30,
@@ -876,6 +1526,361 @@ export default function App() {
                     🧼 Load Care Instructions Tag
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        ) : !cropConfirmed ? (
+          /* Step 1: Crop and Alignment Screen */
+          <div className="bg-stone-950 border border-stone-800 rounded-2xl p-6 shadow-xl space-y-6">
+            <div className="flex flex-col md:flex-row items-start md:items-center justify-between border-b border-stone-800 pb-4 gap-4">
+              <div>
+                <span className="text-[10px] font-mono text-[#ff0000] uppercase font-bold tracking-widest block mb-1">
+                  Step 1 of 2: Pre-Processing Pipeline
+                </span>
+                <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                  <RotateCw className="w-5 h-5 text-[#ff0000] animate-spin-slow" /> Perspective Warp, Crop &amp; Alignment
+                </h2>
+                <p className="text-xs text-stone-400 mt-1">
+                  Correct skewed scans, perspective distortion, or warped borders. Drag the corner handles directly on the canvas below to align the label perfectly.
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    setRawImageSrc(null);
+                    setCropConfirmed(false);
+                    setSelectedFile(null);
+                  }}
+                  className="text-xs text-stone-400 hover:text-white px-3 py-1.5 rounded-lg border border-stone-800 hover:bg-stone-900 transition flex items-center gap-1"
+                >
+                  Change File
+                </button>
+                <button
+                  onClick={handleConfirmCrop}
+                  className="bg-red-600 hover:bg-red-700 text-white text-xs font-semibold px-4 py-2 rounded-lg transition shadow-md shadow-red-600/15 flex items-center gap-2"
+                >
+                  <Check className="w-4 h-4" /> Confirm &amp; Process Loom Map
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Left Column: Live alignment canvas */}
+              <div className="lg:col-span-7 flex flex-col space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-stone-300 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
+                    Interactive Perspective Quad Canvas
+                  </span>
+                  {rawLoadedImage && (
+                    <span className="text-[10px] font-mono text-stone-500">
+                      Original: {rawLoadedImage.width}×{rawLoadedImage.height} px
+                    </span>
+                  )}
+                </div>
+
+                <div className="border border-stone-800 rounded-xl bg-stone-950/60 p-4 flex flex-col items-center justify-center min-h-[380px] max-h-[540px] relative overflow-hidden group">
+                  <canvas
+                    ref={cropPreviewCanvasRef}
+                    onPointerDown={handleCanvasPointerDown}
+                    onPointerMove={handleCanvasPointerMove}
+                    onPointerUp={handleCanvasPointerUp}
+                    onPointerCancel={handleCanvasPointerUp}
+                    className="max-w-full rounded shadow-2xl border border-stone-900 cursor-crosshair select-none"
+                    style={{
+                      maxHeight: "460px",
+                      objectFit: "contain",
+                      touchAction: "none",
+                    }}
+                  />
+                  <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2 bg-stone-950/90 border border-stone-800 text-[10px] text-stone-300 px-3 py-1.5 rounded-full shadow-lg backdrop-blur pointer-events-none text-center">
+                    💡 Drag any corner red pin to straighten &amp; correct label warps/perspective
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] text-stone-400 font-mono bg-stone-900/50 p-2.5 rounded border border-stone-850">
+                  <div className="flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
+                    <span>Guiding grid matches real loom thread direction.</span>
+                  </div>
+                  <span>Rotate/Warp until lines align with grid tracks.</span>
+                </div>
+              </div>
+
+              {/* Right Column: Precise Control Panel */}
+              <div className="lg:col-span-5 space-y-6 bg-stone-950 p-5 rounded-xl border border-stone-850">
+                
+                {/* Section A: Straighten / Angle Adjust */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold tracking-wider text-white uppercase flex items-center gap-2">
+                      <RotateCw className="w-4 h-4 text-[#ff0000]" /> 1. Deskew / Rotate Canvas
+                    </span>
+                    <button
+                      onClick={() => setCropRotation(0)}
+                      className="text-[10px] text-stone-400 hover:text-white border border-stone-800 px-2 py-0.5 rounded transition"
+                    >
+                      Reset Angle
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-stone-400">Rotation Angle:</span>
+                      <span className="font-mono text-[#ff0000] bg-[#ff0000]/10 px-2 py-0.5 rounded font-bold">
+                        {cropRotation.toFixed(1)}°
+                      </span>
+                    </div>
+
+                    <input
+                      type="range"
+                      min="-45"
+                      max="45"
+                      step="0.5"
+                      value={cropRotation}
+                      onChange={(e) => setCropRotation(parseFloat(e.target.value))}
+                      className="w-full accent-[#ff0000] cursor-ew-resize"
+                    />
+
+                    {/* Fine tuning buttons */}
+                    <div className="flex flex-wrap gap-1.5 justify-center pt-1 border-t border-stone-900/50">
+                      <button
+                        onClick={() => setCropRotation((prev) => Math.max(-45, prev - 5))}
+                        className="text-[10px] bg-stone-900 hover:bg-stone-850 text-stone-300 border border-stone-800 px-2 py-1 rounded transition"
+                      >
+                        -5°
+                      </button>
+                      <button
+                        onClick={() => setCropRotation((prev) => Math.max(-45, prev - 1))}
+                        className="text-[10px] bg-stone-900 hover:bg-stone-850 text-stone-300 border border-stone-800 px-2 py-1 rounded transition"
+                      >
+                        -1°
+                      </button>
+                      <button
+                        onClick={() => setCropRotation((prev) => Math.max(-45, prev - 0.1))}
+                        className="text-[10px] bg-stone-900 hover:bg-stone-850 text-stone-300 border border-stone-800 px-2 py-1 rounded transition"
+                      >
+                        -0.1°
+                      </button>
+                      <button
+                        onClick={() => setCropRotation(0)}
+                        className="text-[10px] bg-stone-900/70 hover:bg-stone-850 text-stone-400 border border-stone-800 px-2 py-1 rounded transition font-semibold"
+                      >
+                        0°
+                      </button>
+                      <button
+                        onClick={() => setCropRotation((prev) => Math.min(45, prev + 0.1))}
+                        className="text-[10px] bg-stone-900 hover:bg-stone-850 text-stone-300 border border-stone-800 px-2 py-1 rounded transition"
+                      >
+                        +0.1°
+                      </button>
+                      <button
+                        onClick={() => setCropRotation((prev) => Math.min(45, prev + 1))}
+                        className="text-[10px] bg-stone-900 hover:bg-stone-850 text-stone-300 border border-stone-800 px-2 py-1 rounded transition"
+                      >
+                        +1°
+                      </button>
+                      <button
+                        onClick={() => setCropRotation((prev) => Math.min(45, prev + 5))}
+                        className="text-[10px] bg-stone-900 hover:bg-stone-850 text-[#ff0000] border border-stone-800 px-2 py-1 rounded transition"
+                      >
+                        +5°
+                      </button>
+                    </div>
+
+                    {/* Auto-Straighten / Deskew */}
+                    <div className="pt-2 flex gap-2">
+                      <button
+                        onClick={autoAlignRaw}
+                        disabled={isAutoAligning}
+                        className="flex-1 bg-stone-900 hover:bg-stone-850 hover:text-white border border-stone-800 text-stone-300 text-xs py-2 rounded-lg transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 font-medium"
+                      >
+                        {isAutoAligning ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#ff0000]" />
+                            Evaluating...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3.5 h-3.5 text-[#ff0000]" />
+                            Auto-Straighten Thread Angle
+                          </>
+                        )}
+                      </button>
+                      <button
+                        onClick={autoDetectLabelQuad}
+                        className="bg-stone-900 hover:bg-stone-850 border border-stone-800 text-stone-300 text-xs px-3 py-2 rounded-lg transition flex items-center gap-1"
+                        title="Smart Edge Detection"
+                      >
+                        <Sparkle className="w-3.5 h-3.5 text-red-500" /> Auto-Detect Borders
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Section B: Perspective Corner Pins Fine-Tuning */}
+                <div className="space-y-4 pt-4 border-t border-stone-900">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold tracking-wider text-white uppercase flex items-center gap-2">
+                      <Sliders className="w-4 h-4 text-[#ff0000]" /> 2. Manual Corner Fine-Tuning
+                    </span>
+                    <button
+                      onClick={() => {
+                        setCornerTL({ x: 10, y: 10 });
+                        setCornerTR({ x: 90, y: 10 });
+                        setCornerBR({ x: 90, y: 90 });
+                        setCornerBL({ x: 10, y: 90 });
+                      }}
+                      className="text-[10px] text-stone-400 hover:text-white border border-stone-800 px-2 py-0.5 rounded transition"
+                    >
+                      Reset Corners
+                    </button>
+                  </div>
+
+                  <div className="space-y-3.5 max-h-[320px] overflow-y-auto pr-1">
+                    {/* Top-Left Corner */}
+                    <div className="p-3 bg-stone-900/40 rounded-lg border border-stone-900 space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-mono">
+                        <span className="text-stone-300 font-medium">🔴 Top-Left Pin (TL)</span>
+                        <span className="text-[#ff0000] font-bold">X:{Math.round(cornerTL.x)}% Y:{Math.round(cornerTL.y)}%</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Horizontal (X)</label>
+                          <input
+                            type="range"
+                            min="0"
+                            max="50"
+                            value={cornerTL.x}
+                            onChange={(e) => setCornerTL((prev) => ({ ...prev, x: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Vertical (Y)</label>
+                          <input
+                            type="range"
+                            min="0"
+                            max="50"
+                            value={cornerTL.y}
+                            onChange={(e) => setCornerTL((prev) => ({ ...prev, y: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Top-Right Corner */}
+                    <div className="p-3 bg-stone-900/40 rounded-lg border border-stone-900 space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-mono">
+                        <span className="text-stone-300 font-medium">🔴 Top-Right Pin (TR)</span>
+                        <span className="text-[#ff0000] font-bold">X:{Math.round(cornerTR.x)}% Y:{Math.round(cornerTR.y)}%</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Horizontal (X)</label>
+                          <input
+                            type="range"
+                            min="50"
+                            max="100"
+                            value={cornerTR.x}
+                            onChange={(e) => setCornerTR((prev) => ({ ...prev, x: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Vertical (Y)</label>
+                          <input
+                            type="range"
+                            min="0"
+                            max="50"
+                            value={cornerTR.y}
+                            onChange={(e) => setCornerTR((prev) => ({ ...prev, y: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bottom-Right Corner */}
+                    <div className="p-3 bg-stone-900/40 rounded-lg border border-stone-900 space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-mono">
+                        <span className="text-stone-300 font-medium">🔴 Bottom-Right Pin (BR)</span>
+                        <span className="text-[#ff0000] font-bold">X:{Math.round(cornerBR.x)}% Y:{Math.round(cornerBR.y)}%</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Horizontal (X)</label>
+                          <input
+                            type="range"
+                            min="50"
+                            max="100"
+                            value={cornerBR.x}
+                            onChange={(e) => setCornerBR((prev) => ({ ...prev, x: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Vertical (Y)</label>
+                          <input
+                            type="range"
+                            min="50"
+                            max="100"
+                            value={cornerBR.y}
+                            onChange={(e) => setCornerBR((prev) => ({ ...prev, y: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bottom-Left Corner */}
+                    <div className="p-3 bg-stone-900/40 rounded-lg border border-stone-900 space-y-2">
+                      <div className="flex items-center justify-between text-[11px] font-mono">
+                        <span className="text-stone-300 font-medium">🔴 Bottom-Left Pin (BL)</span>
+                        <span className="text-[#ff0000] font-bold">X:{Math.round(cornerBL.x)}% Y:{Math.round(cornerBL.y)}%</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Horizontal (X)</label>
+                          <input
+                            type="range"
+                            min="0"
+                            max="50"
+                            value={cornerBL.x}
+                            onChange={(e) => setCornerBL((prev) => ({ ...prev, x: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[9px] text-stone-500 block mb-0.5">Vertical (Y)</label>
+                          <input
+                            type="range"
+                            min="50"
+                            max="100"
+                            value={cornerBL.y}
+                            onChange={(e) => setCornerBL((prev) => ({ ...prev, y: parseFloat(e.target.value) }))}
+                            className="w-full accent-red-600 cursor-ew-resize h-1"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Section C: Complete Pre-processing and Continue */}
+                <div className="pt-4 border-t border-stone-900 space-y-3">
+                  <button
+                    onClick={handleConfirmCrop}
+                    className="w-full bg-[#ff0000] hover:bg-red-700 text-white font-semibold py-3 px-4 rounded-xl transition duration-200 shadow-lg shadow-red-600/10 flex items-center justify-center gap-2 hover:scale-[1.01]"
+                  >
+                    <Check className="w-5 h-5" /> Rectify Label &amp; Start Analysis
+                  </button>
+                  <p className="text-[10px] text-stone-500 text-center">
+                    Runs bilinear antialiased quad-rectification and switches to loom matrix mapping.
+                  </p>
+                </div>
+
               </div>
             </div>
           </div>
@@ -892,9 +1897,27 @@ export default function App() {
                   <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
                     <Settings className="w-4 h-4 text-red-500" /> 1. Weave Density &amp; Size
                   </h3>
-                  <span className="text-[10px] bg-stone-850 text-stone-300 px-1.5 py-0.5 rounded font-mono">
-                    Loom Setup
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {originalDimensions && (
+                      <button
+                        onClick={() => {
+                          setSpecs({
+                            widthMm: originalDimensions.width / 10,
+                            heightMm: originalDimensions.height / 10,
+                            warpDensity: 100,
+                            weftDensity: 100,
+                          });
+                        }}
+                        className="text-[10px] bg-red-600/25 hover:bg-red-600 text-red-200 hover:text-white border border-red-500/30 hover:border-red-500 px-2.5 py-0.5 rounded font-medium transition cursor-pointer"
+                        title={`Reset grid dimensions and aspect ratio back to original scan image (${originalDimensions.width} x ${originalDimensions.height} px)`}
+                      >
+                        Reset to Original
+                      </button>
+                    )}
+                    <span className="text-[10px] bg-stone-850 text-stone-300 px-1.5 py-0.5 rounded font-mono">
+                      Loom Setup
+                    </span>
+                  </div>
                 </div>
 
                 <div className="space-y-4">
@@ -962,9 +1985,26 @@ export default function App() {
 
                   {/* Calculations breakdown block */}
                   <div className="bg-stone-900 p-3 rounded border border-stone-800/80 space-y-1.5">
-                    <span className="text-[10px] font-mono text-red-500 font-semibold block uppercase tracking-wide">
-                      Calculated Loom Pixel Map Matrix:
-                    </span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-mono text-red-500 font-semibold block uppercase tracking-wide">
+                        Calculated Loom Pixel Map Matrix:
+                      </span>
+                      {originalDimensions && (targetWidthPx !== originalDimensions.width || targetHeightPx !== originalDimensions.height) && (
+                        <button
+                          onClick={() => {
+                            setSpecs({
+                              widthMm: originalDimensions.width / 10,
+                              heightMm: originalDimensions.height / 10,
+                              warpDensity: 100,
+                              weftDensity: 100,
+                            });
+                          }}
+                          className="text-[9px] bg-red-600/15 hover:bg-red-600/35 text-red-400 hover:text-red-300 border border-red-500/20 px-1.5 py-0.5 rounded font-mono transition cursor-pointer flex items-center gap-1"
+                        >
+                          Reset to {originalDimensions.width}×{originalDimensions.height} Original
+                        </button>
+                      )}
+                    </div>
                     <div className="flex justify-between text-xs">
                       <span className="text-stone-400">Total Warp Ends (Width):</span>
                       <span className="font-mono text-white font-semibold">{targetWidthPx} ends</span>
@@ -977,6 +2017,15 @@ export default function App() {
                       <span className="text-stone-400">Total Points (Loom Cells):</span>
                       <span className="font-mono text-stone-300">{(targetWidthPx * targetHeightPx).toLocaleString()} cells</span>
                     </div>
+                  </div>
+
+                  <div className="pt-2">
+                    <button
+                      onClick={() => setCropConfirmed(false)}
+                      className="w-full text-xs bg-stone-900 hover:bg-stone-850 text-stone-300 hover:text-white border border-stone-800 hover:border-red-500 py-2 px-3 rounded-lg transition flex items-center justify-center gap-1.5 font-medium cursor-pointer shadow-sm"
+                    >
+                      <RotateCw className="w-3.5 h-3.5 text-[#ff0000]" /> Adjust Crop &amp; Alignment
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1092,27 +2141,75 @@ export default function App() {
                       className="flex items-center justify-between bg-stone-900 border border-stone-800 p-2.5 rounded-lg text-xs"
                     >
                       <div className="flex items-center gap-2.5">
-                        <span
-                          className="w-6 h-6 rounded border border-stone-700 block shadow-inner shrink-0"
-                          style={{ backgroundColor: yarn.hex }}
-                        />
+                        {/* Interactive Color Badge Picker */}
+                        <div className="relative w-6 h-6 rounded border border-stone-700 overflow-hidden shrink-0 group cursor-pointer" title="Click to pick a custom color">
+                          <input
+                            type="color"
+                            value={yarn.hex}
+                            onChange={(e) => {
+                              const newHex = e.target.value;
+                              setYarns((prevYarns) =>
+                                prevYarns.map((y) =>
+                                  y.id === yarn.id ? { ...y, hex: newHex } : y
+                                )
+                              );
+                              if (selectedPaintColor === yarn.hex) {
+                                setSelectedPaintColor(newHex);
+                              }
+                            }}
+                            className="absolute inset-0 opacity-0 w-full h-full cursor-pointer z-10"
+                          />
+                          <span
+                            className="absolute inset-0 block shadow-inner"
+                            style={{ backgroundColor: yarn.hex }}
+                          />
+                        </div>
+
                         <div className="space-y-0.5">
                           <div className="font-semibold text-white flex items-center gap-1.5">
-                            {yarn.name}
+                            <input
+                              type="text"
+                              value={yarn.name}
+                              onChange={(e) => {
+                                const newName = e.target.value;
+                                setYarns((prevYarns) =>
+                                  prevYarns.map((y) =>
+                                    y.id === yarn.id ? { ...y, name: newName } : y
+                                  )
+                                );
+                              }}
+                              className="bg-transparent border-b border-transparent hover:border-stone-700/50 focus:border-red-500 focus:bg-stone-950 focus:outline-none text-white font-semibold py-0.5 px-1 rounded -ml-1 text-xs w-28 transition-colors"
+                              title="Edit Yarn Color Name"
+                            />
                             {yarn.isMetallic && (
-                              <span className="text-[9px] bg-red-500/20 text-red-300 border border-red-500/30 px-1 rounded font-mono flex items-center gap-0.5">
+                              <span className="text-[9px] bg-red-500/20 text-red-300 border border-red-500/30 px-1 rounded font-mono flex items-center gap-0.5 shrink-0">
                                 <Sparkle className="w-2.5 h-2.5" /> Lurex
                               </span>
                             )}
                           </div>
-                          <div className="text-[10px] text-stone-400">
-                            {yarn.hex.toUpperCase()} • <span className="italic">{yarn.role}</span>
+                          <div className="text-[10px] text-stone-400 flex items-center gap-1 flex-wrap">
+                            <span className="font-mono text-stone-500">{yarn.hex.toUpperCase()}</span>
+                            <span className="text-stone-600">•</span>
+                            <input
+                              type="text"
+                              value={yarn.role}
+                              onChange={(e) => {
+                                const newRole = e.target.value;
+                                setYarns((prevYarns) =>
+                                  prevYarns.map((y) =>
+                                    y.id === yarn.id ? { ...y, role: newRole } : y
+                                  )
+                                );
+                              }}
+                              className="bg-transparent border-b border-transparent hover:border-stone-700/50 focus:border-red-500 focus:bg-stone-950 focus:outline-none text-stone-400 py-0 px-1 rounded -ml-1 text-[10px] w-36 italic transition-colors"
+                              title="Edit Yarn Role Description"
+                            />
                           </div>
                         </div>
                       </div>
                       <button
                         onClick={() => removeYarn(yarn.id)}
-                        className="text-stone-500 hover:text-red-400 p-1 rounded hover:bg-stone-800 transition"
+                        className="text-stone-500 hover:text-red-400 p-1 rounded hover:bg-stone-800 transition shrink-0"
                         title="Delete yarn color"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1330,32 +2427,38 @@ export default function App() {
                             <span className="text-[10px] text-stone-500 font-mono">Auto-cropped / Rotated</span>
                           </div>
                           
-                          <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] relative p-4 flex items-center justify-center min-h-[220px]">
-                            {/* Hidden Source Canvas that retains the actual rotated resolution */}
-                            <canvas
-                              ref={originalCanvasRef}
-                              onMouseMove={(e) => handleMouseMove(e, false)}
-                              onMouseLeave={handleMouseLeave}
-                              className="max-w-full cursor-crosshair rounded shadow-lg select-none"
+                          <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] p-4 flex items-center justify-center min-h-[220px]">
+                            <div
+                              className="relative"
                               style={{
                                 width: `${targetWidthPx * zoomLevel}px`,
                                 height: `${targetHeightPx * zoomLevel}px`,
-                                imageRendering: "pixelated",
                               }}
-                            />
-
-                            {/* Synced Cursor Hover Box Overlay */}
-                            {hoveredCell && (
-                              <div
-                                className="absolute border border-red-500 pointer-events-none"
+                            >
+                              {/* Hidden Source Canvas that retains the actual rotated resolution */}
+                              <canvas
+                                ref={originalCanvasRef}
+                                onMouseMove={(e) => handleMouseMove(e, false)}
+                                onMouseLeave={handleMouseLeave}
+                                className="w-full h-full cursor-crosshair rounded shadow-lg select-none"
                                 style={{
-                                  width: `${zoomLevel}px`,
-                                  height: `${zoomLevel}px`,
-                                  left: `calc(50% - ${(targetWidthPx * zoomLevel) / 2}px + ${hoveredCell.x * zoomLevel}px + 16px)`,
-                                  top: `calc(50% - ${(targetHeightPx * zoomLevel) / 2}px + ${hoveredCell.y * zoomLevel}px + 16px)`,
+                                  imageRendering: "pixelated",
                                 }}
                               />
-                            )}
+
+                              {/* Synced Cursor Hover Box Overlay */}
+                              {hoveredCell && (
+                                <div
+                                  className="absolute border-2 border-red-500 pointer-events-none z-10"
+                                  style={{
+                                    width: `${zoomLevel}px`,
+                                    height: `${zoomLevel}px`,
+                                    left: `${hoveredCell.x * zoomLevel}px`,
+                                    top: `${hoveredCell.y * zoomLevel}px`,
+                                  }}
+                                />
+                              )}
+                            </div>
                           </div>
                         </div>
 
@@ -1377,9 +2480,16 @@ export default function App() {
                             </label>
                           </div>
 
-                          <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] relative p-4 flex items-center justify-center min-h-[220px]">
-                            <canvas
-                              ref={gridCanvasRef}
+                          <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] p-4 flex items-center justify-center min-h-[220px]">
+                            <div
+                              className="relative"
+                              style={{
+                                width: `${targetWidthPx * zoomLevel}px`,
+                                height: `${targetHeightPx * zoomLevel}px`,
+                              }}
+                            >
+                              <canvas
+                                ref={gridCanvasRef}
                               onMouseDown={handleGridMouseDown}
                               onMouseMove={handleGridMouseMove}
                               onMouseUp={handleGridMouseUp}
@@ -1387,10 +2497,8 @@ export default function App() {
                                 handleMouseLeave();
                                 handleGridMouseUp();
                               }}
-                              className={`max-w-full rounded shadow-lg select-none transition-all ${isPaintMode ? "cursor-cell ring-2 ring-red-500/50" : "cursor-crosshair"}`}
+                              className={`w-full h-full rounded shadow-lg select-none transition-all ${isPaintMode ? "cursor-cell ring-2 ring-red-500/50" : "cursor-crosshair"}`}
                               style={{
-                                width: `${targetWidthPx * zoomLevel}px`,
-                                height: `${targetHeightPx * zoomLevel}px`,
                                 imageRendering: "pixelated",
                               }}
                             />
@@ -1398,10 +2506,8 @@ export default function App() {
                             {/* Render simulated loom wire grid overlay using pure HTML borders over the top if enabled */}
                             {showGridOverlay && (
                               <div
-                                className="absolute pointer-events-none"
+                                className="absolute inset-0 pointer-events-none"
                                 style={{
-                                  width: `${targetWidthPx * zoomLevel}px`,
-                                  height: `${targetHeightPx * zoomLevel}px`,
                                   backgroundImage: `linear-gradient(to right, rgba(100, 116, 139, 0.25) 1px, transparent 1px),
                                                     linear-gradient(to bottom, rgba(100, 116, 139, 0.25) 1px, transparent 1px)`,
                                   backgroundSize: `${zoomLevel}px ${zoomLevel}px`,
@@ -1412,15 +2518,16 @@ export default function App() {
                             {/* Hover Overlay cell details */}
                             {hoveredCell && (
                               <div
-                                className="absolute border border-green-400 pointer-events-none"
+                                className="absolute border-2 border-green-400 pointer-events-none z-10"
                                 style={{
                                   width: `${zoomLevel}px`,
                                   height: `${zoomLevel}px`,
-                                  left: `calc(50% - ${(targetWidthPx * zoomLevel) / 2}px + ${hoveredCell.x * zoomLevel}px + 16px)`,
-                                  top: `calc(50% - ${(targetHeightPx * zoomLevel) / 2}px + ${hoveredCell.y * zoomLevel}px + 16px)`,
+                                  left: `${hoveredCell.x * zoomLevel}px`,
+                                  top: `${hoveredCell.y * zoomLevel}px`,
                                 }}
                               />
                             )}
+                            </div>
                           </div>
                         </div>
                       </div>
