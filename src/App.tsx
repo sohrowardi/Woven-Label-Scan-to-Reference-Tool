@@ -97,6 +97,7 @@ export default function App() {
   const [isDrawing, setIsDrawing] = useState<boolean>(false);
   const [brushSize, setBrushSize] = useState<number>(1);
   const [isAutoAligning, setIsAutoAligning] = useState<boolean>(false);
+  const [isAutoDetecting, setIsAutoDetecting] = useState<boolean>(false);
 
   // Initialize selected paint color to first yarn color
   useEffect(() => {
@@ -573,8 +574,8 @@ export default function App() {
     setCropConfirmed(true);
   };
 
-  // Smart auto-detection of perspective distortion & label contour quad boundaries
-  const autoDetectLabelQuad = () => {
+  // Edge-detection based contour fallback
+  const runContourEdgeHeuristic = () => {
     const img = rawLoadedImage;
     if (!img) return;
 
@@ -592,13 +593,13 @@ export default function App() {
       const w = canvas.width;
       const h = canvas.height;
 
-      // 1. Grayscale conversion
+      // Grayscale conversion
       const gray = new Uint8Array(w * h);
       for (let i = 0; i < d.length; i += 4) {
         gray[i / 4] = Math.round(d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
       }
 
-      // 2. Compute edge intensity gradients (Sobel filter approximation)
+      // Compute edge intensity gradients
       const edges = new Uint8Array(w * h);
       for (let y = 1; y < h - 1; y++) {
         for (let x = 1; x < w - 1; x++) {
@@ -609,7 +610,6 @@ export default function App() {
         }
       }
 
-      // 3. Scan along diagonals from each corner inwards to find high contrast boundaries
       const cx = w / 2;
       const cy = h / 2;
 
@@ -622,36 +622,64 @@ export default function App() {
           if (x < 0 || x >= w || y < 0 || y >= h) continue;
           
           const idx = y * w + x;
-          // Look for sudden gradient spikes indicative of a label's border or contrast shift
           if (edges[idx] > 30) {
-            // Return percentage coordinate
             return { x: (x / w) * 100, y: (y / h) * 100 };
           }
         }
         return null;
       };
 
-      // Query from 5% inset to avoid border scanner noise
       const tl = findEdgeOnLine(w * 0.05, h * 0.05, cx, cy) || { x: 12, y: 12 };
       const tr = findEdgeOnLine(w * 0.95, h * 0.05, cx, cy) || { x: 88, y: 12 };
       const br = findEdgeOnLine(w * 0.95, h * 0.95, cx, cy) || { x: 88, y: 88 };
       const bl = findEdgeOnLine(w * 0.05, h * 0.95, cx, cy) || { x: 12, y: 88 };
 
-      // Ensure reasonable bounds to avoid collapse
       if (Math.abs(tr.x - tl.x) > 15 && Math.abs(br.y - tr.y) > 15) {
         setCornerTL(tl);
         setCornerTR(tr);
         setCornerBR(br);
         setCornerBL(bl);
       } else {
-        // Fallback to generous margins
         setCornerTL({ x: 10, y: 10 });
         setCornerTR({ x: 90, y: 10 });
         setCornerBR({ x: 90, y: 90 });
         setCornerBL({ x: 10, y: 90 });
       }
     } catch (err) {
-      console.error("Label contour detection failed:", err);
+      console.error("Contour edge heuristic fallback failed:", err);
+    }
+  };
+
+  // Smart AI-powered auto-detection of label quad boundaries
+  const autoDetectLabelQuad = async () => {
+    if (!rawImageSrc) return;
+    setIsAutoDetecting(true);
+
+    try {
+      const response = await fetch("/api/detect-borders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64Image: rawImageSrc }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data && data.topLeft && data.topRight && data.bottomRight && data.bottomLeft) {
+        setCornerTL(data.topLeft);
+        setCornerTR(data.topRight);
+        setCornerBR(data.bottomRight);
+        setCornerBL(data.bottomLeft);
+      } else {
+        throw new Error("Invalid response format from AI detection");
+      }
+    } catch (err) {
+      console.warn("AI label border detection failed, running edge heuristic fallback:", err);
+      runContourEdgeHeuristic();
+    } finally {
+      setIsAutoDetecting(false);
     }
   };
 
@@ -662,10 +690,10 @@ export default function App() {
     }
   }, [rawLoadedImage]);
 
-  const autoAlignRaw = () => {
+  // Texture-variance based rotation fallback
+  const runRotationVarianceHeuristic = () => {
     const img = rawLoadedImage;
     if (!img) return;
-    setIsAutoAligning(true);
 
     setTimeout(() => {
       const canvas = document.createElement("canvas");
@@ -673,15 +701,11 @@ export default function App() {
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        setIsAutoAligning(false);
-        return;
-      }
+      if (!ctx) return;
 
       let bestAngle = 0;
       let maxVariance = -1;
 
-      // Scan angles with a step of 0.5 degrees
       for (let angle = -15; angle <= 15; angle += 0.5) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.save();
@@ -693,7 +717,6 @@ export default function App() {
         const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const d = imgData.data;
 
-        // Row projection variance (for weft threads)
         const rowSums = new Float32Array(canvas.height);
         for (let y = 0; y < canvas.height; y++) {
           let sum = 0;
@@ -714,7 +737,6 @@ export default function App() {
           rowVar += diff * diff;
         }
 
-        // Column projection variance (for warp threads)
         const colSums = new Float32Array(canvas.width);
         for (let x = 0; x < canvas.width; x++) {
           let sum = 0;
@@ -743,8 +765,37 @@ export default function App() {
       }
 
       setCropRotation(bestAngle);
-      setIsAutoAligning(false);
     }, 50);
+  };
+
+  // Smart AI-powered thread angle straightening
+  const autoAlignRaw = async () => {
+    if (!rawImageSrc) return;
+    setIsAutoAligning(true);
+
+    try {
+      const response = await fetch("/api/detect-thread-angle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64Image: rawImageSrc }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data && typeof data.rotationAngle === "number") {
+        setCropRotation(data.rotationAngle);
+      } else {
+        throw new Error("Invalid response format from AI straightening");
+      }
+    } catch (err) {
+      console.warn("AI thread angle alignment failed, running variance heuristic fallback:", err);
+      runRotationVarianceHeuristic();
+    } finally {
+      setIsAutoAligning(false);
+    }
   };
 
   // 2. Render whenever loadedImage, params, specs, yarns, or manualEdits change
@@ -1709,10 +1760,20 @@ export default function App() {
                       </button>
                       <button
                         onClick={autoDetectLabelQuad}
-                        className="bg-stone-900 hover:bg-stone-850 border border-stone-800 text-stone-300 text-xs px-3 py-2 rounded-lg transition flex items-center gap-1"
+                        disabled={isAutoDetecting}
+                        className="bg-stone-900 hover:bg-stone-850 border border-stone-800 text-stone-300 text-xs px-3 py-2 rounded-lg transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
                         title="Smart Edge Detection"
                       >
-                        <Sparkle className="w-3.5 h-3.5 text-red-500" /> Auto-Detect Borders
+                        {isAutoDetecting ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#ff0000]" />
+                            Evaluating...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkle className="w-3.5 h-3.5 text-red-500" /> Auto-Detect Borders
+                          </>
+                        )}
                       </button>
                     </div>
                   </div>

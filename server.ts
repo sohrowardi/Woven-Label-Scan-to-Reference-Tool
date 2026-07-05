@@ -143,6 +143,169 @@ Your output must be structured, precise, and highly reliable.`;
   }
 });
 
+// AI Border Detection Endpoint
+app.post("/api/detect-borders", async (req: express.Request, res: express.Response) => {
+  try {
+    if (!ai) {
+      return res.status(500).json({
+        error: "Gemini API is not configured. Please add your GEMINI_API_KEY in the Secrets panel.",
+      });
+    }
+
+    const { base64Image, mimeType } = req.body;
+    if (!base64Image) {
+      return res.status(400).json({ error: "Missing image data." });
+    }
+
+    const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
+
+    const systemInstruction = `You are an expert computer vision and image preprocessing model specializing in physical woven textile labels.
+Your task is to detect the active woven label in a raw image scan or photograph. The image may contain desktop backgrounds, scanner beds, borders, shadows, or other visual noise.
+Identify the four corners of the actual physical woven label in the image:
+1. Top-Left (topLeft)
+2. Top-Right (topRight)
+3. Bottom-Right (bottomRight)
+4. Bottom-Left (bottomLeft)
+
+Return these four corner points as percentage coordinates (0.0 to 100.0) relative to the image canvas.
+For example, a point in the middle is { "x": 50.0, "y": 50.0 }. The top-left corner is { "x": 0.0, "y": 0.0 }.
+Be highly precise and trace the outer boundaries of the woven fabric piece. Ignore the background completely.
+Even if the label is slightly rotated, skewed, or at a perspective angle, output the exact corners of the label's shape.`;
+
+    const userPrompt = "Identify the exact four corner points of the physical woven label in this scan. Return their positions as percentages of the total image width and height.";
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: {
+        parts: [
+          { inlineData: { mimeType: mimeType || "image/png", data: cleanBase64 } },
+          { text: userPrompt }
+        ]
+      },
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            topLeft: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Top-Left corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Top-Left corner." }
+              },
+              required: ["x", "y"]
+            },
+            topRight: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Top-Right corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Top-Right corner." }
+              },
+              required: ["x", "y"]
+            },
+            bottomRight: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Bottom-Right corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Bottom-Right corner." }
+              },
+              required: ["x", "y"]
+            },
+            bottomLeft: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Bottom-Left corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Bottom-Left corner." }
+              },
+              required: ["x", "y"]
+            },
+            confidence: { type: Type.NUMBER, description: "Confidence score between 0.0 and 1.0" }
+          },
+          required: ["topLeft", "topRight", "bottomRight", "bottomLeft", "confidence"]
+        }
+      }
+    });
+
+    const resultText = response.text;
+    if (!resultText) {
+      throw new Error("Empty response received from Gemini.");
+    }
+
+    const parsedData = JSON.parse(resultText.trim());
+    return res.json(parsedData);
+  } catch (error: any) {
+    console.error("Gemini Detect Borders Error:", error);
+    return res.status(500).json({ error: error.message || "Failed to detect label borders." });
+  }
+});
+
+// AI Thread Angle Detection Endpoint
+app.post("/api/detect-thread-angle", async (req: express.Request, res: express.Response) => {
+  try {
+    if (!ai) {
+      return res.status(500).json({
+        error: "Gemini API is not configured. Please add your GEMINI_API_KEY in the Secrets panel.",
+      });
+    }
+
+    const { base64Image, mimeType } = req.body;
+    if (!base64Image) {
+      return res.status(400).json({ error: "Missing image data." });
+    }
+
+    const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
+
+    const systemInstruction = `You are a specialist computer vision model for textile engineering and physical weave structure analysis.
+Your job is to inspect the high-resolution scanned woven label image and determine the rotation angle needed to align the warp and weft threads perfectly to the grid.
+Identify the vertical warp thread direction and the horizontal weft thread direction.
+Determine the angle in degrees (normally between -45.0 and 45.0) that the image should be rotated clockwise (positive values) or counter-clockwise (negative values) to make:
+1. The vertical threads (warp) parallel to the Y-axis (completely straight vertical orientation).
+2. The horizontal threads (weft) parallel to the X-axis (completely straight horizontal orientation).
+
+Analyze text lines, woven grid lines, edges, and texture to determine this rotation alignment correction with extreme precision. Even if the texture is subtle or fine, find the primary orientation grid.`;
+
+    const userPrompt = "Determine the rotation correction angle in degrees to straighten the warp and weft thread alignment of this label.";
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: {
+        parts: [
+          { inlineData: { mimeType: mimeType || "image/png", data: cleanBase64 } },
+          { text: userPrompt }
+        ]
+      },
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            rotationAngle: {
+              type: Type.NUMBER,
+              description: "The rotation angle in degrees to apply. Positive for clockwise, negative for counter-clockwise."
+            },
+            confidence: { type: Type.NUMBER, description: "Confidence score between 0.0 and 1.0" },
+            reasoning: { type: Type.STRING, description: "Brief description of the analysis." }
+          },
+          required: ["rotationAngle", "confidence", "reasoning"]
+        }
+      }
+    });
+
+    const resultText = response.text;
+    if (!resultText) {
+      throw new Error("Empty response received from Gemini.");
+    }
+
+    const parsedData = JSON.parse(resultText.trim());
+    return res.json(parsedData);
+  } catch (error: any) {
+    console.error("Gemini Detect Thread Angle Error:", error);
+    return res.status(500).json({ error: error.message || "Failed to detect thread angle." });
+  }
+});
+
 // Configure Vite or Static Asset delivery
 async function setupServer() {
   if (process.env.NODE_ENV !== "production") {
