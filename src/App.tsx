@@ -20,7 +20,8 @@ import {
   HelpCircle,
   Paintbrush,
   Eraser,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Github
 } from "lucide-react";
 import { YarnColor, ImageParams, TechSpecs, AnalysisResult } from "./types";
 import { snapToPalette, rgbToLab, hexToLab, getDeltaE76 } from "./utils/color";
@@ -82,6 +83,37 @@ export default function App() {
   const [newYarnRole, setNewYarnRole] = useState("Accent");
   const [newYarnIsMetallic, setNewYarnIsMetallic] = useState(false);
 
+  const setNumberOfYarns = (count: number) => {
+    if (count <= 0) return;
+    if (yarns.length === count) return;
+    if (count < yarns.length) {
+      setYarns(yarns.slice(0, count));
+    } else {
+      const extraPresets = [
+        { hex: "#0000ff", name: "Royal Blue", role: "Design Details" },
+        { hex: "#00ff00", name: "Bright Green", role: "Leaf/Logo Accent" },
+        { hex: "#ffff00", name: "Loom Yellow", role: "Text Accent" },
+        { hex: "#ff00ff", name: "Magenta Pink", role: "Brand Pattern" },
+        { hex: "#ff8c00", name: "Orange", role: "Stripe Element" },
+        { hex: "#8a2be2", name: "Purple", role: "Pattern Overlay" },
+      ];
+      const needed = count - yarns.length;
+      const newYarnsList = [...yarns];
+      for (let i = 0; i < needed; i++) {
+        const preset = extraPresets[i % extraPresets.length];
+        const uniqueId = String(Date.now() + i + Math.floor(Math.random() * 1000));
+        newYarnsList.push({
+          id: uniqueId,
+          hex: preset.hex,
+          name: preset.name,
+          role: preset.role,
+          isMetallic: false
+        });
+      }
+      setYarns(newYarnsList);
+    }
+  };
+
   // Zooming & Viewing Controls
   const [zoomLevel, setZoomLevel] = useState<number>(4);
   const [showGridOverlay, setShowGridOverlay] = useState<boolean>(true);
@@ -98,6 +130,71 @@ export default function App() {
   const [brushSize, setBrushSize] = useState<number>(1);
   const [isAutoAligning, setIsAutoAligning] = useState<boolean>(false);
   const [isAutoDetecting, setIsAutoDetecting] = useState<boolean>(false);
+
+  // AI Artwork Reconstruction & Vector Refinement States
+  const [rawCroppedImageSrc, setRawCroppedImageSrc] = useState<string | null>(null);
+  const [reconstructedSvg, setReconstructedSvg] = useState<string | null>(null);
+  const [reconstructedImage, setReconstructedImage] = useState<HTMLImageElement | null>(null);
+  const [isReconstructing, setIsReconstructing] = useState<boolean>(false);
+  const [useReconstructedSource, setUseReconstructedSource] = useState<boolean>(false);
+  const [detectedFonts, setDetectedFonts] = useState<string[]>([]);
+  const [reconstructReasoning, setReconstructReasoning] = useState<string>("");
+
+  const handleAiReconstruct = async () => {
+    if (!imageSrc) return;
+    setIsReconstructing(true);
+    setReconstructReasoning("");
+    try {
+      // Send raw cropped image data URL (fallback to imageSrc)
+      const base64Image = rawCroppedImageSrc || imageSrc;
+      const response = await fetch("/api/reconstruct-artwork", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          base64Image,
+          mimeType: "image/png",
+          paletteColors: yarns,
+        }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || "Failed to reconstruct label artwork.");
+      }
+
+      const data = await response.json();
+      if (!data.cleanSvg) {
+        throw new Error("Invalid response from AI reconstruction service.");
+      }
+
+      setReconstructedSvg(data.cleanSvg);
+      setDetectedFonts(data.detectedFonts || []);
+      setReconstructReasoning(data.reasoning || "");
+
+      // Convert SVG string to HTML Image
+      const svgBlob = new Blob([data.cleanSvg], { type: "image/svg+xml;charset=utf-8" });
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.src = reader.result as string;
+        img.onload = () => {
+          setReconstructedImage(img);
+          setUseReconstructedSource(true);
+          setIsReconstructing(false);
+        };
+        img.onerror = () => {
+          console.error("Failed to load generated SVG as an Image.");
+          setIsReconstructing(false);
+          alert("Error rendering reconstructed SVG artwork. Please try again.");
+        };
+      };
+      reader.readAsDataURL(svgBlob);
+    } catch (err: any) {
+      console.error("AI Reconstruction Error:", err);
+      alert(`AI Reconstruction failed: ${err.message}`);
+      setIsReconstructing(false);
+    }
+  };
 
   // Initialize selected paint color to first yarn color
   useEffect(() => {
@@ -571,6 +668,10 @@ export default function App() {
 
     const croppedDataUrl = cropCanvas.toDataURL("image/png");
     setImageSrc(croppedDataUrl);
+    setRawCroppedImageSrc(croppedDataUrl);
+    setReconstructedSvg(null);
+    setReconstructedImage(null);
+    setUseReconstructedSource(false);
     setCropConfirmed(true);
   };
 
@@ -650,7 +751,101 @@ export default function App() {
     }
   };
 
-  // Smart AI-powered auto-detection of label quad boundaries
+  // Automatic Cloud AI Scan for Yarn Palette & Tech Specs on initial upload
+  const runCloudAnalysisOnUpload = async (overrideSrc?: string) => {
+    const srcToUse = overrideSrc || rawImageSrc;
+    if (!srcToUse) return;
+    setAnalyzing(true);
+    try {
+      const response = await fetch("/api/analyze-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          base64Image: srcToUse,
+          mimeType: selectedFile?.type || "image/png",
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to analyze.");
+      }
+
+      const data: AnalysisResult = await response.json();
+      setAnalysisResult(data);
+      
+      // Update dimensions & densities to match the expert estimate
+      setSpecs({
+        widthMm: data.estimatedWidthMm || specs.widthMm,
+        heightMm: data.estimatedHeightMm || specs.heightMm,
+        warpDensity: data.estimatedWarpDensity || specs.warpDensity,
+        weftDensity: data.estimatedWeftDensity || specs.weftDensity,
+      });
+
+      // Map the extracted yarn colors to our system
+      if (data.yarnPalette && data.yarnPalette.length > 0) {
+        const newYarns: YarnColor[] = data.yarnPalette.map((y, idx) => ({
+          id: `ai-${idx}`,
+          hex: y.hex,
+          name: y.name,
+          role: y.role,
+          isMetallic: y.role.toLowerCase().includes("shiny") || y.role.toLowerCase().includes("metallic") || y.role.toLowerCase().includes("lurex"),
+        }));
+        setYarns(newYarns);
+        if (newYarns.length > 0) {
+          setSelectedPaintColor(newYarns[0].hex);
+        }
+      }
+    } catch (err: any) {
+      console.warn("AI Yarn Palette & Spec detection failed:", err);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  // Unified AI-powered auto-detection of borders, thread angle, rotation, skew & perspective
+  const autoDetectAndStraighten = async (overrideSrc?: string) => {
+    const srcToUse = overrideSrc || rawImageSrc;
+    if (!srcToUse) return;
+    setIsAutoDetecting(true);
+
+    try {
+      const response = await fetch("/api/auto-detect-straighten", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          base64Image: srcToUse,
+          mimeType: selectedFile?.type || "image/png"
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data && data.topLeft && data.topRight && data.bottomRight && data.bottomLeft) {
+        setCornerTL(data.topLeft);
+        setCornerTR(data.topRight);
+        setCornerBR(data.bottomRight);
+        setCornerBL(data.bottomLeft);
+        if (typeof data.rotationAngle === "number") {
+          setCropRotation(data.rotationAngle);
+        }
+      } else {
+        throw new Error("Invalid response format from AI auto-detect & straighten");
+      }
+    } catch (err) {
+      console.warn("AI Auto-Detect & Straighten failed, running heuristic fallbacks:", err);
+      // Run both heuristic fallbacks
+      runContourEdgeHeuristic();
+      runRotationVarianceHeuristic();
+    } finally {
+      setIsAutoDetecting(false);
+    }
+  };
+
+  // Smart AI-powered auto-detection of label quad boundaries (retained for fallback)
   const autoDetectLabelQuad = async () => {
     if (!rawImageSrc) return;
     setIsAutoDetecting(true);
@@ -683,10 +878,12 @@ export default function App() {
     }
   };
 
-  // Trigger automatic contour-detection and straighten once raw image loads
+  // Trigger automatic AI analysis & straightening once raw image loads
   useEffect(() => {
-    if (rawLoadedImage) {
-      autoDetectLabelQuad();
+    if (rawLoadedImage && rawImageSrc) {
+      // Trigger both in parallel for a seamless automatic upload pipeline
+      autoDetectAndStraighten(rawImageSrc);
+      runCloudAnalysisOnUpload(rawImageSrc);
     }
   }, [rawLoadedImage]);
 
@@ -798,12 +995,12 @@ export default function App() {
     }
   };
 
-  // 2. Render whenever loadedImage, params, specs, yarns, or manualEdits change
+  // 2. Render whenever loadedImage, reconstructedImage, useReconstructedSource, params, specs, yarns, or manualEdits change
   useEffect(() => {
     if (!loadedImage) return;
-    sourceImageRef.current = loadedImage;
+    sourceImageRef.current = useReconstructedSource && reconstructedImage ? reconstructedImage : loadedImage;
     renderProcessedOriginal();
-  }, [loadedImage, params, specs, yarns, manualEdits]);
+  }, [loadedImage, reconstructedImage, useReconstructedSource, params, specs, yarns, manualEdits]);
 
   // Render the pre-processed canvas
   const renderProcessedOriginal = () => {
@@ -1656,6 +1853,209 @@ export default function App() {
                   </div>
                   <span>Rotate/Warp until lines align with grid tracks.</span>
                 </div>
+
+                {/* Step 1 Yarn Palette Snapping & Color Customization */}
+                <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 space-y-4 shadow-md mt-4">
+                  <div className="flex items-center justify-between border-b border-stone-800 pb-3">
+                    <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
+                      <Grid className="w-4 h-4 text-red-500" /> Yarn Palette Snapping &amp; Color Customization
+                    </h3>
+                    <span className="text-[10px] bg-stone-850 text-stone-300 px-1.5 py-0.5 rounded font-mono">
+                      {yarns.length} Colors Active
+                    </span>
+                  </div>
+
+                  {/* AI Status Alert Banner */}
+                  <div className="rounded-lg p-3 bg-stone-900 border border-stone-850 text-xs flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      {analyzing ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 text-red-500 animate-spin" />
+                          <span className="text-stone-300 font-medium">Gemini is automatically scanning threads for yarn colors &amp; loom specifications...</span>
+                        </>
+                      ) : (
+                        <>
+                          <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                          <span className="text-stone-300">
+                            {analysisResult ? (
+                              <>AI Scan Completed: <strong>{yarns.length} solid colors</strong> identified from label scan.</>
+                            ) : (
+                              <>Ready. Upload a scan to trigger automatic yarn color analysis.</>
+                            )}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Choose Number of Yarn Colors directly */}
+                  <div className="space-y-2 bg-stone-900/50 p-3 rounded-lg border border-stone-900">
+                    <div className="flex items-center justify-between text-xs font-semibold text-stone-300">
+                      <span>Set Number of Yarn Colors:</span>
+                      <span className="font-mono text-red-500 bg-red-500/10 px-2 py-0.5 rounded font-bold">
+                        {yarns.length} Active Yarns
+                      </span>
+                    </div>
+                    <div className="flex gap-1.5">
+                      {[2, 3, 4, 5, 6, 7, 8].map((count) => (
+                        <button
+                          key={count}
+                          type="button"
+                          onClick={() => setNumberOfYarns(count)}
+                          className={`flex-1 text-xs py-1.5 rounded font-bold border transition duration-150 ${
+                            yarns.length === count
+                              ? "bg-red-600 text-white border-red-500 shadow-md shadow-red-600/10"
+                              : "bg-stone-950 text-stone-400 border-stone-850 hover:text-white hover:bg-stone-900"
+                          }`}
+                        >
+                          {count}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-stone-500">
+                      Choosing a preset automatically adds/removes yarn swatches. Cells will instantly snap to these exact non-anti-aliased colors.
+                    </p>
+                  </div>
+
+                  {/* Yarn swatch list */}
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                    {yarns.map((yarn) => (
+                      <div
+                        key={yarn.id}
+                        className="flex items-center justify-between bg-stone-900 border border-stone-800 p-2.5 rounded-lg text-xs"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          {/* Interactive Color Badge Picker */}
+                          <div className="relative w-6 h-6 rounded border border-stone-700 overflow-hidden shrink-0 group cursor-pointer" title="Click to pick a custom color">
+                            <input
+                              type="color"
+                              value={yarn.hex}
+                              onChange={(e) => {
+                                const newHex = e.target.value;
+                                setYarns((prevYarns) =>
+                                  prevYarns.map((y) =>
+                                    y.id === yarn.id ? { ...y, hex: newHex } : y
+                                  )
+                                );
+                                if (selectedPaintColor === yarn.hex) {
+                                  setSelectedPaintColor(newHex);
+                                }
+                              }}
+                              className="absolute inset-0 opacity-0 w-full h-full cursor-pointer z-10"
+                            />
+                            <span
+                              className="absolute inset-0 block shadow-inner"
+                              style={{ backgroundColor: yarn.hex }}
+                            />
+                          </div>
+
+                          <div className="space-y-0.5">
+                            <div className="font-semibold text-white flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                value={yarn.name}
+                                onChange={(e) => {
+                                  const newName = e.target.value;
+                                  setYarns((prevYarns) =>
+                                    prevYarns.map((y) =>
+                                      y.id === yarn.id ? { ...y, name: newName } : y
+                                    )
+                                  );
+                                }}
+                                className="bg-transparent border-b border-transparent hover:border-stone-700/50 focus:border-red-500 focus:bg-stone-950 focus:outline-none text-white font-semibold py-0.5 px-1 rounded -ml-1 text-xs w-28 transition-colors"
+                                title="Edit Yarn Color Name"
+                              />
+                              {yarn.isMetallic && (
+                                <span className="text-[9px] bg-red-500/20 text-red-300 border border-red-500/30 px-1 rounded font-mono flex items-center gap-0.5 shrink-0">
+                                  <Sparkle className="w-2.5 h-2.5" /> Lurex
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-stone-400 flex items-center gap-1 flex-wrap">
+                              <span className="font-mono text-stone-500">{yarn.hex.toUpperCase()}</span>
+                              <span className="text-stone-600">•</span>
+                              <input
+                                type="text"
+                                value={yarn.role}
+                                onChange={(e) => {
+                                  const newRole = e.target.value;
+                                  setYarns((prevYarns) =>
+                                    prevYarns.map((y) =>
+                                      y.id === yarn.id ? { ...y, role: newRole } : y
+                                    )
+                                  );
+                                }}
+                                className="bg-transparent border-b border-transparent hover:border-stone-700/50 focus:border-red-500 focus:bg-stone-950 focus:outline-none text-stone-400 py-0 px-1 rounded -ml-1 text-[10px] w-36 italic transition-colors"
+                                title="Edit Yarn Role Description"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => removeYarn(yarn.id)}
+                          className="text-stone-500 hover:text-red-400 p-1 rounded hover:bg-stone-850 transition shrink-0"
+                          title="Delete yarn color"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Add new yarn form */}
+                  <form onSubmit={handleAddYarn} className="bg-stone-900 border border-stone-800 p-3 rounded-lg space-y-3">
+                    <span className="block text-[10px] font-mono text-stone-400 uppercase tracking-wide">Add Custom Yarn / Color Variation:</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] text-stone-500 block mb-0.5 font-mono">HEX CODE</label>
+                        <div className="flex gap-1.5">
+                          <input
+                            type="color"
+                            value={newYarnHex}
+                            onChange={(e) => setNewYarnHex(e.target.value)}
+                            className="w-8 h-8 rounded bg-stone-900 border border-stone-700 cursor-pointer p-0 shrink-0"
+                          />
+                          <input
+                            type="text"
+                            value={newYarnHex}
+                            onChange={(e) => setNewYarnHex(e.target.value)}
+                            className="bg-stone-800 border border-stone-700 rounded px-1.5 py-1 text-xs w-full text-white font-mono"
+                            placeholder="#000000"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-stone-500 block mb-0.5 font-mono">YARN NAME / DESIGNATION</label>
+                        <input
+                          type="text"
+                          value={newYarnName}
+                          onChange={(e) => setNewYarnName(e.target.value)}
+                          className="bg-stone-800 border border-stone-700 rounded px-1.5 py-1 text-xs w-full text-white"
+                          placeholder="Gold Lurex..."
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1">
+                      <label className="flex items-center gap-1.5 text-xs text-stone-300 cursor-pointer">
+                         <input
+                          type="checkbox"
+                          checked={newYarnIsMetallic}
+                          onChange={(e) => setNewYarnIsMetallic(e.target.checked)}
+                          className="rounded accent-red-600 bg-stone-800 border-stone-700"
+                        />
+                        <span>Shiny / Metallic Yarn</span>
+                      </label>
+
+                      <button
+                        type="submit"
+                        className="bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Save Yarn
+                      </button>
+                    </div>
+                  </form>
+                </div>
               </div>
 
               {/* Right Column: Precise Control Panel */}
@@ -1739,39 +2139,22 @@ export default function App() {
                       </button>
                     </div>
 
-                    {/* Auto-Straighten / Deskew */}
-                    <div className="pt-2 flex gap-2">
+                    {/* Merged AI-powered Auto Detect & Straighten */}
+                    <div className="pt-2">
                       <button
-                        onClick={autoAlignRaw}
-                        disabled={isAutoAligning}
-                        className="flex-1 bg-stone-900 hover:bg-stone-850 hover:text-white border border-stone-800 text-stone-300 text-xs py-2 rounded-lg transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 font-medium"
-                      >
-                        {isAutoAligning ? (
-                          <>
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#ff0000]" />
-                            Evaluating...
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles className="w-3.5 h-3.5 text-[#ff0000]" />
-                            Auto-Straighten Thread Angle
-                          </>
-                        )}
-                      </button>
-                      <button
-                        onClick={autoDetectLabelQuad}
+                        onClick={() => autoDetectAndStraighten()}
                         disabled={isAutoDetecting}
-                        className="bg-stone-900 hover:bg-stone-850 border border-stone-800 text-stone-300 text-xs px-3 py-2 rounded-lg transition flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-                        title="Smart Edge Detection"
+                        className="w-full bg-[#ff0000] hover:bg-red-600 text-white text-xs font-bold py-2.5 px-4 rounded-lg transition duration-150 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 hover:scale-[1.01]"
                       >
                         {isAutoDetecting ? (
                           <>
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#ff0000]" />
-                            Evaluating...
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>AI Aligning & Detecting Corners...</span>
                           </>
                         ) : (
                           <>
-                            <Sparkle className="w-3.5 h-3.5 text-red-500" /> Auto-Detect Borders
+                            <Sparkles className="w-3.5 h-3.5 text-red-200" />
+                            <span>Auto Detect & Straighten</span>
                           </>
                         )}
                       </button>
@@ -1927,6 +2310,55 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+                </div>
+
+                {/* AI-powered Technical Thread Analysis & Advice */}
+                <div className="space-y-4 pt-4 border-t border-stone-900">
+                  <span className="text-xs font-semibold tracking-wider text-white uppercase flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#ff0000]" /> 3. AI Textile Insights &amp; Specs
+                  </span>
+                  
+                  {analyzing ? (
+                    <div className="bg-stone-900/50 border border-stone-850 p-4 rounded-lg flex flex-col items-center justify-center gap-2.5 text-center text-xs text-stone-400">
+                      <RefreshCw className="w-6 h-6 text-red-500 animate-spin" />
+                      <div>
+                        <p className="font-semibold text-stone-300">Gemini is analyzing threads...</p>
+                        <p className="text-[10px] text-stone-500 mt-1">
+                          Identifying weave structures, warp/weft picked thread count, and digital layout parameters.
+                        </p>
+                      </div>
+                    </div>
+                  ) : analysisResult ? (
+                    <div className="space-y-3 text-xs">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-stone-900 border border-stone-850 p-2.5 rounded-lg">
+                          <span className="text-[9px] font-mono text-red-500 uppercase block">Weave Type</span>
+                          <span className="font-bold text-white text-[11px]">{analysisResult.weaveType}</span>
+                        </div>
+                        <div className="bg-stone-900 border border-stone-850 p-2.5 rounded-lg">
+                          <span className="text-[9px] font-mono text-red-500 uppercase block">Optimal Grid</span>
+                          <span className="font-bold text-white text-[11px]">
+                            {analysisResult.estimatedWarpDensity} ends × {analysisResult.estimatedWeftDensity} picks
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="bg-stone-900 border border-stone-850 p-3 rounded-lg space-y-2">
+                        <span className="text-[9.5px] font-mono text-red-500 uppercase tracking-wide block">
+                          MÜCAD Loom Programming Advice:
+                        </span>
+                        <ul className="space-y-1.5 pl-3 list-disc text-stone-300 text-[11px] leading-relaxed">
+                          {analysisResult.mucadAdvice.map((advice, i) => (
+                            <li key={i}>{advice}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-stone-900/30 border border-stone-900 p-3.5 rounded-lg text-xs text-stone-400 text-center">
+                      Upload a label scan. Gemini will automatically analyze the fabric structure and display optimal weave specifications here.
+                    </div>
+                  )}
                 </div>
 
                 {/* Section C: Complete Pre-processing and Continue */}
@@ -2179,161 +2611,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Box 3: Designer-Curated Yarn Palette */}
-              <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 space-y-4 shadow-md">
-                <div className="flex items-center justify-between border-b border-stone-800 pb-3">
-                  <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
-                    <Grid className="w-4 h-4 text-red-500" /> 3. Yarn Palette Snapping
-                  </h3>
-                  <span className="text-[10px] bg-stone-850 text-stone-300 px-1.5 py-0.5 rounded font-mono">
-                    {yarns.length} Colors Active
-                  </span>
-                </div>
-
-                <p className="text-xs text-stone-400">
-                  Weave cells snap automatically to this precise, non-anti-aliased palette using CIELAB distance formula to prevent color bleeding.
-                </p>
-
-                {/* Yarn list */}
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                  {yarns.map((yarn) => (
-                    <div
-                      key={yarn.id}
-                      className="flex items-center justify-between bg-stone-900 border border-stone-800 p-2.5 rounded-lg text-xs"
-                    >
-                      <div className="flex items-center gap-2.5">
-                        {/* Interactive Color Badge Picker */}
-                        <div className="relative w-6 h-6 rounded border border-stone-700 overflow-hidden shrink-0 group cursor-pointer" title="Click to pick a custom color">
-                          <input
-                            type="color"
-                            value={yarn.hex}
-                            onChange={(e) => {
-                              const newHex = e.target.value;
-                              setYarns((prevYarns) =>
-                                prevYarns.map((y) =>
-                                  y.id === yarn.id ? { ...y, hex: newHex } : y
-                                )
-                              );
-                              if (selectedPaintColor === yarn.hex) {
-                                setSelectedPaintColor(newHex);
-                              }
-                            }}
-                            className="absolute inset-0 opacity-0 w-full h-full cursor-pointer z-10"
-                          />
-                          <span
-                            className="absolute inset-0 block shadow-inner"
-                            style={{ backgroundColor: yarn.hex }}
-                          />
-                        </div>
-
-                        <div className="space-y-0.5">
-                          <div className="font-semibold text-white flex items-center gap-1.5">
-                            <input
-                              type="text"
-                              value={yarn.name}
-                              onChange={(e) => {
-                                const newName = e.target.value;
-                                setYarns((prevYarns) =>
-                                  prevYarns.map((y) =>
-                                    y.id === yarn.id ? { ...y, name: newName } : y
-                                  )
-                                );
-                              }}
-                              className="bg-transparent border-b border-transparent hover:border-stone-700/50 focus:border-red-500 focus:bg-stone-950 focus:outline-none text-white font-semibold py-0.5 px-1 rounded -ml-1 text-xs w-28 transition-colors"
-                              title="Edit Yarn Color Name"
-                            />
-                            {yarn.isMetallic && (
-                              <span className="text-[9px] bg-red-500/20 text-red-300 border border-red-500/30 px-1 rounded font-mono flex items-center gap-0.5 shrink-0">
-                                <Sparkle className="w-2.5 h-2.5" /> Lurex
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[10px] text-stone-400 flex items-center gap-1 flex-wrap">
-                            <span className="font-mono text-stone-500">{yarn.hex.toUpperCase()}</span>
-                            <span className="text-stone-600">•</span>
-                            <input
-                              type="text"
-                              value={yarn.role}
-                              onChange={(e) => {
-                                const newRole = e.target.value;
-                                setYarns((prevYarns) =>
-                                  prevYarns.map((y) =>
-                                    y.id === yarn.id ? { ...y, role: newRole } : y
-                                  )
-                                );
-                              }}
-                              className="bg-transparent border-b border-transparent hover:border-stone-700/50 focus:border-red-500 focus:bg-stone-950 focus:outline-none text-stone-400 py-0 px-1 rounded -ml-1 text-[10px] w-36 italic transition-colors"
-                              title="Edit Yarn Role Description"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => removeYarn(yarn.id)}
-                        className="text-stone-500 hover:text-red-400 p-1 rounded hover:bg-stone-800 transition shrink-0"
-                        title="Delete yarn color"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Add new yarn form */}
-                <form onSubmit={handleAddYarn} className="bg-stone-900 border border-stone-800 p-3 rounded-lg space-y-3">
-                  <span className="block text-[10px] font-mono text-stone-400 uppercase tracking-wide">Add Custom Yarn Spec:</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[10px] text-stone-500 block mb-0.5 font-mono">HEX CODE</label>
-                      <div className="flex gap-1.5">
-                        <input
-                          type="color"
-                          value={newYarnHex}
-                          onChange={(e) => setNewYarnHex(e.target.value)}
-                          className="w-8 h-8 rounded bg-stone-900 border border-stone-700 cursor-pointer p-0 shrink-0"
-                        />
-                        <input
-                          type="text"
-                          value={newYarnHex}
-                          onChange={(e) => setNewYarnHex(e.target.value)}
-                          className="bg-stone-800 border border-stone-700 rounded px-1.5 py-1 text-xs w-full text-white font-mono"
-                          placeholder="#000000"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-stone-500 block mb-0.5 font-mono">YARN DESIGNATION</label>
-                      <input
-                        type="text"
-                        value={newYarnName}
-                        onChange={(e) => setNewYarnName(e.target.value)}
-                        className="bg-stone-800 border border-stone-700 rounded px-1.5 py-1 text-xs w-full text-white"
-                        placeholder="Red Lurex..."
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-1">
-                    <label className="flex items-center gap-1.5 text-xs text-stone-300 cursor-pointer">
-                       <input
-                        type="checkbox"
-                        checked={newYarnIsMetallic}
-                        onChange={(e) => setNewYarnIsMetallic(e.target.checked)}
-                        className="rounded accent-red-600 bg-stone-800 border-stone-700"
-                      />
-                      <span>Shiny / Metallic Yarn</span>
-                    </label>
-
-                    <button
-                      type="submit"
-                      className="bg-red-600 hover:bg-red-700 text-white px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1 transition"
-                    >
-                      <Plus className="w-3.5 h-3.5" /> Save Yarn
-                    </button>
-                  </div>
-                </form>
-              </div>
-
             </div>
 
             {/* RIGHT SIDEBAR: Primary Visualization Workspace */}
@@ -2405,6 +2682,127 @@ export default function App() {
                             </select>
                           </div>
                         </div>
+                      </div>
+
+                      {/* AI Artwork Reconstruction & Vector Refinement Panel */}
+                      <div className="bg-stone-900 border border-stone-800 rounded-xl p-4 space-y-4 shadow-inner">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold font-mono tracking-wider bg-red-500/15 text-red-400 border border-red-500/20 uppercase">
+                              <Sparkles className="w-3 h-3 animate-pulse" /> Precision AI Vector Engine
+                            </span>
+                            <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                              AI Artwork Reconstruction & Refinement
+                            </h4>
+                            <p className="text-[11px] text-stone-400 max-w-xl leading-relaxed">
+                              Uses advanced vision analysis to faithfully reconstruct the design. Recreates text using matching Google web fonts, refines logos/borders into smooth vector shapes, and eliminates all weft/warp scanning noise.
+                            </p>
+                          </div>
+
+                          <div className="flex sm:flex-col gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={handleAiReconstruct}
+                              disabled={isReconstructing || !imageSrc}
+                              className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition select-none ${
+                                isReconstructing
+                                  ? "bg-stone-850 text-stone-500 border border-stone-800 cursor-not-allowed"
+                                  : "bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-650/10 cursor-pointer"
+                              }`}
+                            >
+                              {isReconstructing ? (
+                                <>
+                                  <RefreshCw className="w-4 h-4 animate-spin" />
+                                  <span>Reconstructing...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="w-4 h-4 text-red-200" />
+                                  <span>Reconstruct Artwork</span>
+                                </>
+                              )}
+                            </button>
+
+                            {reconstructedSvg && (
+                              <button
+                                type="button"
+                                onClick={() => setUseReconstructedSource(!useReconstructedSource)}
+                                className={`px-4 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 border transition select-none ${
+                                  useReconstructedSource
+                                    ? "bg-stone-800 hover:bg-stone-750 text-white border-stone-700"
+                                    : "bg-stone-950 hover:bg-stone-900 text-stone-400 hover:text-white border-stone-800"
+                                }`}
+                              >
+                                {useReconstructedSource ? (
+                                  <>
+                                    <Check className="w-3.5 h-3.5 text-green-400" />
+                                    <span>Using AI Artwork</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Eye className="w-3.5 h-3.5 text-stone-500" />
+                                    <span>Switch to AI Artwork</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Display reconstruction details once successful */}
+                        {reconstructedSvg && (
+                          <div className="border-t border-stone-800 pt-3.5 space-y-3 animate-fade-in">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="bg-stone-950 p-2.5 rounded border border-stone-800/80 space-y-1.5">
+                                <span className="text-[10px] font-bold font-mono tracking-wider text-stone-400 uppercase block">
+                                  Matched Typographic Fonts:
+                                </span>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {detectedFonts.length > 0 ? (
+                                    detectedFonts.map((font) => (
+                                      <span
+                                        key={font}
+                                        className="text-[11px] font-mono px-2 py-0.5 rounded bg-stone-900 text-stone-200 border border-stone-800"
+                                      >
+                                        {font}
+                                      </span>
+                                    ))
+                                  ) : (
+                                    <span className="text-[11px] text-stone-500 italic">No web fonts required.</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="bg-stone-950 p-2.5 rounded border border-stone-800/80 space-y-1">
+                                <span className="text-[10px] font-bold font-mono tracking-wider text-stone-400 uppercase block">
+                                  Vector Geometry Reasoning:
+                                </span>
+                                <p className="text-[11px] text-stone-300 leading-relaxed max-h-[72px] overflow-y-auto font-sans">
+                                  {reconstructReasoning || "Reconstructed with perfect alignment and solid flat-color snapping."}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Option to clear and revert */}
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[11px] text-stone-400 gap-2">
+                              <span className="flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                                Pristine vector source active. Manual brush edits can still be applied on top.
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setUseReconstructedSource(false);
+                                  setReconstructedSvg(null);
+                                  setReconstructedImage(null);
+                                }}
+                                className="text-red-400 hover:text-red-300 transition underline decoration-dotted underline-offset-2 self-start sm:self-auto"
+                              >
+                                Clear AI Artwork & Revert
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {/* Paint/Correction Mode Toolset */}
@@ -2482,10 +2880,12 @@ export default function App() {
                         <div className={`space-y-2 ${showOriginalInComparison ? "block" : "hidden"}`}>
                           <div className="flex items-center justify-between">
                             <span className="text-xs text-stone-300 font-semibold flex items-center gap-1">
-                              <span className="w-2 h-2 rounded-full bg-amber-500 block animate-pulse" />
-                              Processed Physical Scan Source
+                              <span className={`w-2 h-2 rounded-full block animate-pulse ${useReconstructedSource ? "bg-green-500" : "bg-amber-500"}`} />
+                              {useReconstructedSource ? "AI Reconstructed Vector Source" : "Processed Physical Scan Source"}
                             </span>
-                            <span className="text-[10px] text-stone-500 font-mono">Auto-cropped / Rotated</span>
+                            <span className="text-[10px] text-stone-500 font-mono">
+                              {useReconstructedSource ? "Pristine SVG" : "Auto-cropped / Rotated"}
+                            </span>
                           </div>
                           
                           <div className="border border-stone-800 rounded-lg overflow-auto bg-stone-900 max-h-[480px] p-4 flex items-center justify-center min-h-[220px]">
@@ -2685,83 +3085,6 @@ export default function App() {
                 })()}
               </div>
 
-              {/* Box 5: Gemini scan analyzer card */}
-              <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 shadow-lg space-y-4">
-                <div className="flex items-center justify-between border-b border-stone-800 pb-3">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="w-5 h-5 text-red-500" />
-                    <div>
-                      <h4 className="text-sm font-semibold text-white uppercase">
-                        AI Label Analysis Assistant
-                      </h4>
-                      <p className="text-[10px] text-stone-400">
-                        Scan threads with computer vision to calculate density &amp; extract palette.
-                      </p>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={runCloudAnalysis}
-                    disabled={analyzing}
-                    className="bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
-                  >
-                    {analyzing ? (
-                      <>
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Counting Threads...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-3.5 h-3.5" /> Analyze Scan With AI
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                {analysisResult ? (
-                  <div className="space-y-4 text-xs">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg">
-                        <span className="text-[10px] font-mono text-red-500 uppercase">Estimated Weave Type</span>
-                        <p className="text-sm font-bold text-white mt-0.5">{analysisResult.weaveType}</p>
-                      </div>
-                      <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg">
-                        <span className="text-[10px] font-mono text-red-500 uppercase">Suggested Dimensions</span>
-                        <p className="text-sm font-bold text-white mt-0.5">
-                          {analysisResult.estimatedWidthMm}mm × {analysisResult.estimatedHeightMm}mm
-                        </p>
-                      </div>
-                      <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg">
-                        <span className="text-[10px] font-mono text-red-500 uppercase">Estimated Warp x Weft</span>
-                        <p className="text-sm font-bold text-white mt-0.5">
-                          {analysisResult.estimatedWarpDensity} ends × {analysisResult.estimatedWeftDensity} picks
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="bg-stone-900 border border-stone-800 p-3.5 rounded-lg space-y-2">
-                      <span className="text-[10px] font-mono text-red-500 uppercase tracking-wide block">
-                        Professional MÜCAD Loom Programming Advice:
-                      </span>
-                      <ul className="space-y-1.5 pl-4 list-disc text-stone-300">
-                        {analysisResult.mucadAdvice.map((advice, i) => (
-                          <li key={i}>{advice}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="bg-stone-900 border border-stone-800 p-4 rounded-lg flex items-center gap-3.5 text-xs text-stone-400">
-                    <Info className="w-5 h-5 text-red-500 shrink-0" />
-                    <div>
-                      <p className="font-semibold text-stone-300">AI Thread Analysis Available</p>
-                      <p className="text-[11px] text-stone-400 mt-0.5">
-                        Click &apos;Analyze Scan With AI&apos; to query Gemini 3.5. It will estimate physical label dimensions, warp/weft spacing, and output precise MÜCAD setup specifications automatically.
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-
             </div>
 
           </div>
@@ -2809,6 +3132,17 @@ export default function App() {
       <footer className="border-t border-stone-800 bg-stone-950 py-8 px-6 text-center text-xs text-stone-500 mt-12">
         <p>© 2026 Woven Label Scan-to-Reference Tool. Built for Jakob Müller MÜCAD designers.</p>
         <p className="mt-1">Designed with desktop precision to eliminate repetitive magnification strain.</p>
+        <p className="mt-2 flex items-center justify-center gap-1.5 text-stone-600 hover:text-stone-400 transition-colors">
+          <Github className="w-3.5 h-3.5" />
+          <a
+            href="https://github.com/sohrowardi"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-stone-300 transition-colors font-semibold"
+          >
+            @sohrowardi
+          </a>
+        </p>
       </footer>
     </div>
   );

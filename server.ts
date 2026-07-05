@@ -306,6 +306,216 @@ Analyze text lines, woven grid lines, edges, and texture to determine this rotat
   }
 });
 
+// Unified AI Border Detection & Thread Straightening Endpoint
+app.post("/api/auto-detect-straighten", async (req: express.Request, res: express.Response) => {
+  try {
+    if (!ai) {
+      return res.status(500).json({
+        error: "Gemini API is not configured. Please add your GEMINI_API_KEY in the Secrets panel.",
+      });
+    }
+
+    const { base64Image, mimeType } = req.body;
+    if (!base64Image) {
+      return res.status(400).json({ error: "Missing image data." });
+    }
+
+    const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
+
+    const systemInstruction = `You are an expert computer vision system and textile engineer specializing in physical woven labels.
+Your task is to analyze the scanned woven label image and identify BOTH the active outer boundary corners of the label and the required rotation correction angle to perfectly align the threads.
+
+1. OUTER BORDERS (topLeft, topRight, bottomRight, bottomLeft):
+   Identify the four corners of the actual physical woven label in the image.
+   The scan might contain background colors, scanner beds, borders, shadows, or other noise. Identify the exact outer borders of the woven fabric piece.
+   Return these as percentage coordinates (0.0 to 100.0) relative to the image canvas.
+   - topLeft: top-left corner (typically around x: 10, y: 10)
+   - topRight: top-right corner (typically around x: 90, y: 10)
+   - bottomRight: bottom-right corner (typically around x: 90, y: 90)
+   - bottomLeft: bottom-left corner (typically around x: 10, y: 90)
+
+2. THREAD ALIGNMENT ROTATION (rotationAngle):
+   Identify the vertical warp thread direction and the horizontal weft thread direction.
+   Determine the angle in degrees (normally between -45.0 and 45.0) that the image should be rotated clockwise (positive values) or counter-clockwise (negative values) to make:
+   - The vertical threads (warp) parallel to the Y-axis (completely straight vertical orientation).
+   - The horizontal threads (weft) parallel to the X-axis (completely straight horizontal orientation).
+
+Ensure the analysis is highly intelligent and robust, disregarding scanning noise, warp/weft skewing, or perspective distortion. Return all values inside a single JSON object.`;
+
+    const userPrompt = "Analyze this physical woven label scan. Detect the exact four corners of the label as percentage coordinates and find the precise thread alignment correction angle in degrees.";
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: {
+        parts: [
+          { inlineData: { mimeType: mimeType || "image/png", data: cleanBase64 } },
+          { text: userPrompt }
+        ]
+      },
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            topLeft: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Top-Left corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Top-Left corner." }
+              },
+              required: ["x", "y"]
+            },
+            topRight: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Top-Right corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Top-Right corner." }
+              },
+              required: ["x", "y"]
+            },
+            bottomRight: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Bottom-Right corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Bottom-Right corner." }
+              },
+              required: ["x", "y"]
+            },
+            bottomLeft: {
+              type: Type.OBJECT,
+              properties: {
+                x: { type: Type.NUMBER, description: "X percentage (0.0 - 100.0) of Bottom-Left corner." },
+                y: { type: Type.NUMBER, description: "Y percentage (0.0 - 100.0) of Bottom-Left corner." }
+              },
+              required: ["x", "y"]
+            },
+            rotationAngle: {
+              type: Type.NUMBER,
+              description: "The rotation angle in degrees to apply. Positive for clockwise, negative for counter-clockwise."
+            },
+            confidence: { type: Type.NUMBER, description: "Confidence score between 0.0 and 1.0" },
+            reasoning: { type: Type.STRING, description: "Brief description of the border and angle analysis." }
+          },
+          required: ["topLeft", "topRight", "bottomRight", "bottomLeft", "rotationAngle", "confidence", "reasoning"]
+        }
+      }
+    });
+
+    const resultText = response.text;
+    if (!resultText) {
+      throw new Error("Empty response received from Gemini.");
+    }
+
+    const parsedData = JSON.parse(resultText.trim());
+    return res.json(parsedData);
+  } catch (error: any) {
+    console.error("Gemini Auto-Detect-Straighten Error:", error);
+    return res.status(500).json({ error: error.message || "Failed to auto-detect and straighten label." });
+  }
+});
+
+// AI Artwork Reconstruction & Vector Refinement Endpoint
+app.post("/api/reconstruct-artwork", async (req: express.Request, res: express.Response) => {
+  try {
+    if (!ai) {
+      return res.status(500).json({
+        error: "Gemini API is not configured. Please add your GEMINI_API_KEY in the Secrets panel.",
+      });
+    }
+
+    const { base64Image, mimeType, paletteColors } = req.body;
+    if (!base64Image) {
+      return res.status(400).json({ error: "Missing image data." });
+    }
+
+    const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
+
+    const colorsDescription = paletteColors && paletteColors.length > 0
+      ? `The target label yarn palette contains these solid colors:
+${paletteColors.map((c: any) => `- HEX: ${c.hex} (Name: ${c.name}, Role: ${c.role})`).join("\n")}
+You MUST ONLY use these exact HEX colors for your fill and stroke attributes in the SVG. Do NOT introduce any other colors!`
+      : "Ensure you use distinct, high-contrast solid colors that match the scanned label colors.";
+
+    const systemInstruction = `You are a professional digital label designer and vector graphic artist specializing in physical woven textile label reconstructions.
+Your task is to analyze the scanned physical woven label image (which has thread textures, dust, shadows, noise, blurred text, and scanning artifacts) and reconstruct its clean, pristine digital artwork as a single, perfectly valid SVG document.
+
+CRITICAL OBJECTIVES:
+1. IDENTIFY & MATCH FONTS PRECISELY:
+   - Carefully inspect the text on the scanned label. Determine the font family, font-family type (serif, sans-serif, monospaced, decorative, script), character shapes, weight (regular, medium, bold), spacing, and alignment.
+   - Match the identified font as closely as possible to a popular, widely available Google web font. For example:
+     * If the font is a geometric sans-serif (like Futura or Avant Garde), use "Space Grotesk", "Montserrat", "Inter", or "Bebas Neue".
+     * If it is a clean modern neo-grotesque, use "Inter" or "Roboto".
+     * If it is an elegant classical serif (like Garamond or Baskerville), use "EB Garamond" or "Lora".
+     * If it is a high-contrast premium luxury serif (like Didot or Bodoni), use "Playfair Display" or "Cinzel".
+     * If it is a technical monospaced font, use "JetBrains Mono" or "Fira Code".
+   - Under NO circumstances use a generic unstyled font if the design features styled lettering. Identify and match the font family precisely.
+   - Embed Google Fonts inside the SVG using an @import statement inside a <style> block at the top of your SVG (e.g., \`@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Montserrat:wght@400;600&display=swap');\`), and apply the correct \`font-family\` attribute to your \`<text>\` tags.
+   - Adjust \`letter-spacing\`, \`font-size\`, \`font-weight\`, and position coordinates to perfectly replicate the spacing, proportions, weight, and layout of the original text.
+
+2. RECONSTRUCT LOGOS, SYMBOLS, BORDERS & SHAPES:
+   - Identify any emblems, icons, logos, or brand marks on the label. Reconstruct them using clean, precise vector elements (such as \`<path>\`, \`<circle>\`, \`<rect>\`, \`<polygon>\`, or grouped geometries \`<g>\`).
+   - Smooth out all jagged, pixelated edges and thread textures. Remove scanning artifacts, shadows, dust, folds, and blur, preserving only the underlying geometric shapes.
+   - Ensure curves are smooth (using Bézier cubic/quadratic curve path notation 'C' or 'Q') and lines are razor-sharp.
+   - Reconstruct borders, lines, and frames with consistent width and perfect vertical/horizontal alignment.
+
+3. COLOR PALETTE FIDELITY:
+   ${colorsDescription}
+   Assign the colors from the palette to their respective visual components (e.g., background color to a full-size \`<rect>\` that fills the SVG, text color to the text tags, logo colors to paths).
+
+4. FAITHFUL & CONSERVATIVE RESTORATION:
+   - Do NOT redesign or "improve" the label artistically. Recreate the original woven label as faithfully as possible.
+   - Maintain exact proportions, relative sizing, spacing, positioning, and shapes.
+   - Treat the scanned image as an imperfect capture of a beautiful, clean digital original. Your goal is to restore that original digital file exactly.
+
+Ensure the output is a complete, well-formed, valid SVG string. The SVG must have a standard \`viewBox\` attribute representing the aspect ratio of the image. It should NOT contain any markdown block formatting (like \`\`\`xml) within the JSON string property itself; return the raw SVG code.`;
+
+    const userPrompt = `Perform a high-fidelity vector reconstruction of the scanned woven label label. Return a single-page clean SVG code, a list of detected Google fonts, and your brief reasoning.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: [
+        { inlineData: { mimeType: mimeType || "image/png", data: cleanBase64 } },
+        { text: userPrompt }
+      ],
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            cleanSvg: {
+              type: Type.STRING,
+              description: "The complete, valid SVG markup string containing the reconstructed vector artwork. It must start with '<svg' and end with '</svg>'. Must include the embedded Google Font imports and styles."
+            },
+            detectedFonts: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "The Google Font family names identified and imported in the SVG."
+            },
+            reasoning: {
+              type: Type.STRING,
+              description: "Brief reasoning about font matching, text layout, logo geometries traced, and color assignments."
+            }
+          },
+          required: ["cleanSvg", "detectedFonts", "reasoning"]
+        }
+      }
+    });
+
+    const resultText = response.text;
+    if (!resultText) {
+      throw new Error("Empty response received from Gemini.");
+    }
+
+    const parsedData = JSON.parse(resultText.trim());
+    return res.json(parsedData);
+  } catch (error: any) {
+    console.error("Gemini Artwork Reconstruct Error:", error);
+    return res.status(500).json({ error: error.message || "Failed to reconstruct artwork." });
+  }
+});
+
 // Configure Vite or Static Asset delivery
 async function setupServer() {
   if (process.env.NODE_ENV !== "production") {
