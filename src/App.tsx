@@ -21,16 +21,281 @@ import {
   Paintbrush,
   Eraser,
   FileSpreadsheet,
-  Github
+  Github,
+  ZoomIn,
+  ZoomOut,
+  AlertCircle,
+  X
 } from "lucide-react";
 import { YarnColor, ImageParams, TechSpecs, AnalysisResult } from "./types";
 import { snapToPalette, rgbToLab, hexToLab, getDeltaE76 } from "./utils/color";
+import { JacquardWeaveSimulator } from "./components/JacquardWeaveSimulator";
 
 const DEFAULT_YARNS: YarnColor[] = [
   { id: "1", hex: "#ff0000", name: "Red", role: "Background Pattern", isMetallic: false },
   { id: "2", hex: "#ffffff", name: "White", role: "Gear symbol & Müller text", isMetallic: false },
   { id: "3", hex: "#000000", name: "Black", role: "Structure/Border", isMetallic: false },
 ];
+
+const ensureSvgDimensions = (svgString: string): string => {
+  let clean = svgString.trim();
+  if (clean.includes("```xml")) {
+    clean = clean.split("```xml")[1].split("```")[0].trim();
+  } else if (clean.includes("```html")) {
+    clean = clean.split("```html")[1].split("```")[0].trim();
+  } else if (clean.includes("```")) {
+    clean = clean.split("```")[1].split("```")[0].trim();
+  }
+
+  const svgStartIndex = clean.indexOf("<svg");
+  if (svgStartIndex !== -1) {
+    clean = clean.substring(svgStartIndex);
+  }
+
+  const viewBoxMatch = clean.match(/viewBox=["']\s*(-?[0-9.]+)(?:[\s,]+(-?[0-9.]+))(?:[\s,]+(-?[0-9.]+))(?:[\s,]+(-?[0-9.]+))\s*["']/i);
+  let w = "800";
+  let h = "600";
+  if (viewBoxMatch && viewBoxMatch[3] && viewBoxMatch[4]) {
+    w = viewBoxMatch[3];
+    h = viewBoxMatch[4];
+  }
+
+  // Remove any existing width and height attributes to avoid percentage conflicts
+  clean = clean.replace(/<svg([^>]*)\bwidth\s*=\s*["'][^"']*["']/gi, '<svg$1');
+  clean = clean.replace(/<svg([^>]*)\bheight\s*=\s*["'][^"']*["']/gi, '<svg$1');
+
+  // Enforce absolute pixel width and height attributes based on viewBox
+  clean = clean.replace(/<svg([^>]*)/i, (match, attrs) => {
+    return `<svg width="${w}" height="${h}"${attrs}`;
+  });
+
+  // Ensure xmlns is present so it renders correctly as image
+  if (!clean.includes("xmlns=")) {
+    clean = clean.replace(/<svg([^>]*)/i, (match, attrs) => {
+      return `<svg xmlns="http://www.w3.org/2000/svg"${attrs}`;
+    });
+  }
+
+  return clean;
+};
+
+const sanitizeSvgForCanvas = (svgString: string): string => {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgString, "image/svg+xml");
+    
+    // Check if there are any parsing errors
+    const parserError = doc.querySelector("parsererror");
+    if (parserError) {
+      console.warn("SVG Parsing error during sanitization, falling back to regex.");
+      return svgString
+        .replace(/@import[^;]+;/gi, "")
+        .replace(/@font-face\s*\{[^}]*\}/gi, "")
+        .replace(/<link[^>]+>/gi, "")
+        .replace(/<image[^>]+href=["']http[^"']+["'][^>]*>/gi, "");
+    }
+
+    // 1. Strip external stylesheets/links
+    const links = doc.querySelectorAll("link");
+    links.forEach(link => link.remove());
+
+    // 2. Strip external fonts and imports in style elements
+    const styles = doc.querySelectorAll("style");
+    styles.forEach(style => {
+      let content = style.textContent || "";
+      // Strip imports (with or without url(), single/double/no quotes)
+      content = content.replace(/@import[^;]+;/gi, "");
+      // Strip font-faces pointing to external files
+      content = content.replace(/@font-face\s*\{[^}]*\}/gi, "");
+      style.textContent = content;
+    });
+
+    // 3. Strip external images
+    const images = doc.querySelectorAll("image");
+    images.forEach(img => {
+      const href = img.getAttribute("href") || img.getAttribute("xlink:href") || "";
+      if (href.startsWith("http://") || href.startsWith("https://")) {
+        img.remove();
+      }
+    });
+
+    const serializer = new XMLSerializer();
+    return serializer.serializeToString(doc);
+  } catch (err) {
+    console.error("DOMParser sanitization failed:", err);
+    return svgString
+      .replace(/@import[^;]+;/gi, "")
+      .replace(/@font-face\s*\{[^}]*\}/gi, "")
+      .replace(/<link[^>]+>/gi, "")
+      .replace(/<image[^>]+href=["']http[^"']+["'][^>]*>/gi, "");
+  }
+};
+
+const renderSvgToCanvas = (svgString: string, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) => {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(svgString, "image/svg+xml");
+  const svg = doc.querySelector("svg");
+  if (!svg) return;
+
+  const viewBoxAttr = svg.getAttribute("viewBox");
+  let viewW = canvas.width;
+  let viewH = canvas.height;
+  if (viewBoxAttr) {
+    const parts = viewBoxAttr.trim().split(/[\s,]+/);
+    if (parts.length === 4) {
+      viewW = parseFloat(parts[2]);
+      viewH = parseFloat(parts[3]);
+    }
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  ctx.save();
+  ctx.scale(canvas.width / viewW, canvas.height / viewH);
+
+  const renderElement = (el: Element, parentFill = "none", parentStroke = "none", parentStrokeWidth = 1) => {
+    const tagName = el.tagName.toLowerCase();
+    
+    ctx.save();
+
+    const transform = el.getAttribute("transform");
+    if (transform) {
+      const translateMatch = transform.match(/translate\(\s*(-?[0-9.]+)\s*[\s,]+\s*(-?[0-9.]+)\s*\)/);
+      if (translateMatch) {
+        ctx.translate(parseFloat(translateMatch[1]), parseFloat(translateMatch[2]));
+      }
+      const rotateMatch = transform.match(/rotate\(\s*(-?[0-9.]+)\s*\)/);
+      if (rotateMatch) {
+        ctx.rotate((parseFloat(rotateMatch[1]) * Math.PI) / 180);
+      }
+    }
+
+    const localFill = el.getAttribute("fill");
+    const fill = localFill !== null ? localFill : parentFill;
+
+    const localStroke = el.getAttribute("stroke");
+    const stroke = localStroke !== null ? localStroke : parentStroke;
+
+    const localStrokeWidth = el.getAttribute("stroke-width");
+    const strokeWidth = localStrokeWidth !== null ? parseFloat(localStrokeWidth) : parentStrokeWidth;
+
+    if (tagName === "rect") {
+      const x = parseFloat(el.getAttribute("x") || "0");
+      const y = parseFloat(el.getAttribute("y") || "0");
+      const w = parseFloat(el.getAttribute("width") || "0");
+      const h = parseFloat(el.getAttribute("height") || "0");
+      
+      if (fill !== "none") {
+        ctx.fillStyle = fill;
+        ctx.fillRect(x, y, w, h);
+      }
+      if (stroke !== "none") {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = strokeWidth;
+        ctx.strokeRect(x, y, w, h);
+      }
+    } else if (tagName === "circle") {
+      const cx = parseFloat(el.getAttribute("cx") || "0");
+      const cy = parseFloat(el.getAttribute("cy") || "0");
+      const r = parseFloat(el.getAttribute("r") || "0");
+      
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+      if (fill !== "none") {
+        ctx.fillStyle = fill;
+        ctx.fill();
+      }
+      if (stroke !== "none") {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = strokeWidth;
+        ctx.stroke();
+      }
+    } else if (tagName === "polygon") {
+      const pointsAttr = el.getAttribute("points");
+      if (pointsAttr) {
+        const coords = pointsAttr.trim().split(/[\s,]+/).map(parseFloat);
+        if (coords.length >= 4) {
+          ctx.beginPath();
+          ctx.moveTo(coords[0], coords[1]);
+          for (let i = 2; i < coords.length; i += 2) {
+            ctx.lineTo(coords[i], coords[i + 1]);
+          }
+          ctx.closePath();
+          if (fill !== "none") {
+            ctx.fillStyle = fill;
+            ctx.fill();
+          }
+          if (stroke !== "none") {
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = strokeWidth;
+            ctx.stroke();
+          }
+        }
+      }
+    } else if (tagName === "path") {
+      const d = el.getAttribute("d");
+      if (d) {
+        const path = new Path2D(d);
+        if (fill !== "none") {
+          ctx.fillStyle = fill;
+          ctx.fill(path);
+        }
+        if (stroke !== "none") {
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = strokeWidth;
+          ctx.stroke(path);
+        }
+      }
+    } else if (tagName === "text") {
+      const x = parseFloat(el.getAttribute("x") || "0");
+      const y = parseFloat(el.getAttribute("y") || "0");
+      const text = el.textContent || "";
+      
+      const fontSize = el.getAttribute("font-size") || "12px";
+      const fontFamily = el.getAttribute("font-family") || "sans-serif";
+      const fontWeight = el.getAttribute("font-weight") || "normal";
+      
+      ctx.font = `${fontWeight} ${fontSize.includes("px") ? fontSize : fontSize + "px"} ${fontFamily}`;
+      
+      const textAnchor = el.getAttribute("text-anchor") || "start";
+      if (textAnchor === "middle") {
+        ctx.textAlign = "center";
+      } else if (textAnchor === "end") {
+        ctx.textAlign = "right";
+      } else {
+        ctx.textAlign = "left";
+      }
+      
+      if (fill !== "none") {
+        ctx.fillStyle = fill;
+        ctx.fillText(text, x, y);
+      }
+      if (stroke !== "none") {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = strokeWidth;
+        ctx.strokeText(text, x, y);
+      }
+    } else if (tagName === "g") {
+      Array.from(el.children).forEach(child => renderElement(child, fill, stroke, strokeWidth));
+    }
+
+    ctx.restore();
+  };
+
+  Array.from(svg.children).forEach(child => renderElement(child));
+  ctx.restore();
+};
+
+const drawSvgDirectlyToCanvas = (svgString: string, targetCanvas: HTMLCanvasElement, targetCtx: CanvasRenderingContext2D, dx: number, dy: number, dw: number, dh: number) => {
+  const offscreen = document.createElement("canvas");
+  offscreen.width = dw;
+  offscreen.height = dh;
+  const offscreenCtx = offscreen.getContext("2d");
+  if (!offscreenCtx) return;
+
+  renderSvgToCanvas(svgString, offscreen, offscreenCtx);
+  targetCtx.drawImage(offscreen, dx, dy, dw, dh);
+};
 
 export default function App() {
   // State
@@ -119,6 +384,23 @@ export default function App() {
   const [showGridOverlay, setShowGridOverlay] = useState<boolean>(true);
   const [showOriginalInComparison, setShowOriginalInComparison] = useState<boolean>(true);
   
+  // Toast Notification states
+  const [toast, setToast] = useState<{ message: string; type: "error" | "success" | "info" } | null>(null);
+
+  const showToast = (message: string, type: "error" | "success" | "info" = "error") => {
+    setToast({ message, type });
+    // Keep error/quota alerts visible for 10 seconds or until manually closed
+    setTimeout(() => {
+      setToast((current) => current?.message === message ? null : current);
+    }, 10000);
+  };
+  
+  // Manual Grid Calibration / Sub-Pixel Nudging States
+  const [gridNudgeX, setGridNudgeX] = useState<number>(0);
+  const [gridNudgeY, setGridNudgeY] = useState<number>(0);
+  const [gridNudgeScaleX, setGridNudgeScaleX] = useState<number>(100);
+  const [gridNudgeScaleY, setGridNudgeScaleY] = useState<number>(100);
+  
   // Interactive coordinate synchronization
   const [hoveredCell, setHoveredCell] = useState<{ x: number; y: number } | null>(null);
 
@@ -140,6 +422,171 @@ export default function App() {
   const [detectedFonts, setDetectedFonts] = useState<string[]>([]);
   const [reconstructReasoning, setReconstructReasoning] = useState<string>("");
 
+  // Tool-specific Gemini Intelligence States
+  const [palettePrompt, setPalettePrompt] = useState<string>("");
+  const [isGeneratingPalette, setIsGeneratingPalette] = useState<boolean>(false);
+
+  const [isApplyingFilterPreset, setIsApplyingFilterPreset] = useState<boolean>(false);
+
+  const [loomQuery, setLoomQuery] = useState<string>("");
+  const [isCalculatingSpecs, setIsCalculatingSpecs] = useState<boolean>(false);
+  const [loomAdvice, setLoomAdvice] = useState<string[]>([]);
+  const [loomReasoning, setLoomReasoning] = useState<string>("");
+
+  const [paintInstruction, setPaintInstruction] = useState<string>("");
+  const [isProcessingPaint, setIsProcessingPaint] = useState<boolean>(false);
+  const [paintReasoning, setPaintReasoning] = useState<string>("");
+
+  const [refinementPrompt, setRefinementPrompt] = useState<string>("");
+
+  const handleGeneratePalette = async () => {
+    if (!palettePrompt.trim()) return;
+    setIsGeneratingPalette(true);
+    try {
+      const response = await fetch("/api/generate-palette", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: palettePrompt,
+          currentPalette: yarns,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to generate custom palette");
+      }
+      const data = await response.json();
+      if (data.yarnPalette && data.yarnPalette.length > 0) {
+        const newYarns: YarnColor[] = data.yarnPalette.map((y: any, idx: number) => ({
+          id: `ai-gen-${idx}-${Date.now()}`,
+          hex: y.hex,
+          name: y.name,
+          role: y.role,
+          isMetallic: y.role.toLowerCase().includes("shiny") || y.role.toLowerCase().includes("metallic") || y.role.toLowerCase().includes("lurex"),
+        }));
+        setYarns(newYarns);
+        setSelectedPaintColor(newYarns[0].hex);
+        setPalettePrompt("");
+      }
+    } catch (err: any) {
+      console.error(err);
+      showToast(`Palette Generation failed: ${err.message}`, "error");
+    } finally {
+      setIsGeneratingPalette(false);
+    }
+  };
+
+  const handleApplyFilterPreset = async (presetName: string) => {
+    setIsApplyingFilterPreset(true);
+    try {
+      const response = await fetch("/api/ai-filter-preset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          base64Image: imageSrc || undefined,
+          mimeType: "image/png",
+          presetName,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to load filter preset");
+      }
+      const data = await response.json();
+      setParams({
+        brightness: data.brightness ?? params.brightness,
+        contrast: data.contrast ?? params.contrast,
+        sharpness: data.sharpness ?? params.sharpness,
+        denoise: data.denoise ?? params.denoise,
+        edgeDetect: !!data.edgeDetect,
+        rotation: params.rotation,
+      });
+    } catch (err: any) {
+      console.error(err);
+      showToast(`Failed to apply filter preset: ${err.message}`, "error");
+    } finally {
+      setIsApplyingFilterPreset(false);
+    }
+  };
+
+  const handleCalculateLoomSpecs = async () => {
+    if (!loomQuery.trim()) return;
+    setIsCalculatingSpecs(true);
+    try {
+      const response = await fetch("/api/ai-loom-specs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentSpecs: specs,
+          query: loomQuery,
+          base64Image: imageSrc || undefined,
+          mimeType: "image/png",
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to calculate specs");
+      }
+      const data = await response.json();
+      setSpecs({
+        widthMm: data.widthMm ?? specs.widthMm,
+        heightMm: data.heightMm ?? specs.heightMm,
+        warpDensity: data.warpDensity ?? specs.warpDensity,
+        weftDensity: data.weftDensity ?? specs.weftDensity,
+      });
+      setLoomAdvice(data.advice || []);
+      setLoomReasoning(data.reasoning || "");
+      setLoomQuery("");
+    } catch (err: any) {
+      console.error(err);
+      showToast(`AI Loom Specs consultant failed: ${err.message}`, "error");
+    } finally {
+      setIsCalculatingSpecs(false);
+    }
+  };
+
+  const handleApplyPaintCopilot = async () => {
+    if (!paintInstruction.trim()) return;
+    setIsProcessingPaint(true);
+    setPaintReasoning("");
+    try {
+      const response = await fetch("/api/ai-paint-copilot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          width: targetWidthPx,
+          height: targetHeightPx,
+          paletteColors: yarns,
+          instruction: paintInstruction,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to process drawing instruction");
+      }
+      const data = await response.json();
+      setPaintReasoning(data.reasoning || "");
+      if (data.edits && data.edits.length > 0) {
+        setManualEdits((prev) => {
+          const newEdits = { ...prev };
+          data.edits.forEach((edit: any) => {
+            const key = `${edit.x},${edit.y}`;
+            if (edit.hex === "eraser") {
+              delete newEdits[key];
+            } else {
+              newEdits[key] = edit.hex;
+            }
+          });
+          return newEdits;
+        });
+        setPaintInstruction("");
+      } else {
+        showToast("Gemini did not suggest any coordinates to edit. Try to rephrase your request.", "info");
+      }
+    } catch (err: any) {
+      console.error(err);
+      showToast(`AI Paint Copilot failed: ${err.message}`, "error");
+    } finally {
+      setIsProcessingPaint(false);
+    }
+  };
+
   const handleAiReconstruct = async () => {
     if (!imageSrc) return;
     setIsReconstructing(true);
@@ -154,6 +601,7 @@ export default function App() {
           base64Image,
           mimeType: "image/png",
           paletteColors: yarns,
+          refinementPrompt: refinementPrompt.trim() || undefined,
         }),
       });
 
@@ -167,12 +615,15 @@ export default function App() {
         throw new Error("Invalid response from AI reconstruction service.");
       }
 
-      setReconstructedSvg(data.cleanSvg);
+      const processedSvg = ensureSvgDimensions(data.cleanSvg);
+      const canvasSvg = sanitizeSvgForCanvas(processedSvg);
+
+      setReconstructedSvg(processedSvg);
       setDetectedFonts(data.detectedFonts || []);
       setReconstructReasoning(data.reasoning || "");
 
-      // Convert SVG string to HTML Image
-      const svgBlob = new Blob([data.cleanSvg], { type: "image/svg+xml;charset=utf-8" });
+      // Convert clean, self-contained SVG string to HTML Image
+      const svgBlob = new Blob([canvasSvg], { type: "image/svg+xml;charset=utf-8" });
       const reader = new FileReader();
       reader.onload = () => {
         const img = new Image();
@@ -185,13 +636,13 @@ export default function App() {
         img.onerror = () => {
           console.error("Failed to load generated SVG as an Image.");
           setIsReconstructing(false);
-          alert("Error rendering reconstructed SVG artwork. Please try again.");
+          showToast("Error rendering reconstructed SVG artwork. Please try again.", "error");
         };
       };
       reader.readAsDataURL(svgBlob);
     } catch (err: any) {
       console.error("AI Reconstruction Error:", err);
-      alert(`AI Reconstruction failed: ${err.message}`);
+      showToast(`AI Reconstruction failed: ${err.message}`, "error");
       setIsReconstructing(false);
     }
   };
@@ -212,16 +663,64 @@ export default function App() {
   const originalCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const gridCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sourceImageRef = useRef<HTMLImageElement | null>(null);
+  
+  // Performance caching for mousemove coordinate inspector
+  const cellAveragesRef = useRef<Record<string, { r: number; g: number; b: number }>>({});
 
-  // Handle file uploads
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setSelectedFile(file);
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        if (event.target?.result) {
-          setRawImageSrc(event.target.result as string);
+  // Helper function to downscale extremely large images before processing, preventing NetworkError payloads and saving tokens
+  const resizeImageIfNeeded = (dataUrl: string, maxDimension: number = 1200): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.src = dataUrl;
+      img.onload = () => {
+        const width = img.width;
+        const height = img.height;
+        if (width <= maxDimension && height <= maxDimension) {
+          resolve(dataUrl);
+          return;
+        }
+        
+        let newWidth = width;
+        let newHeight = height;
+        if (width > height) {
+          if (width > maxDimension) {
+            newHeight = Math.round((height * maxDimension) / width);
+            newWidth = maxDimension;
+          }
+        } else {
+          if (height > maxDimension) {
+            newWidth = Math.round((width * maxDimension) / height);
+            newHeight = maxDimension;
+          }
+        }
+        
+        const canvas = document.createElement("canvas");
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, newWidth, newHeight);
+          // Compress as JPEG to keep the payload size extremely small (usually ~10x-20x smaller than PNG)
+          resolve(canvas.toDataURL("image/jpeg", 0.85));
+        } else {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => {
+        resolve(dataUrl);
+      };
+    });
+  };
+
+  // Process selected file (read, resize if needed, and initialize crop states)
+  const processAndSetFile = (file: File) => {
+    setSelectedFile(file);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        const resultStr = event.target.result as string;
+        resizeImageIfNeeded(resultStr).then((processedSrc) => {
+          setRawImageSrc(processedSrc);
           setCropConfirmed(false);
           setCropRotation(0);
           setCropLeft(0);
@@ -232,9 +731,16 @@ export default function App() {
           setCornerTR({ x: 90, y: 10 });
           setCornerBR({ x: 90, y: 90 });
           setCornerBL({ x: 10, y: 90 });
-        }
-      };
-      reader.readAsDataURL(file);
+        });
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Handle file uploads
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      processAndSetFile(e.target.files[0]);
     }
   };
 
@@ -285,7 +791,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error(err);
-      alert(`AI Analysis Error: ${err.message}`);
+      showToast(`AI Analysis Error: ${err.message}`, "error");
     } finally {
       setAnalyzing(false);
     }
@@ -595,11 +1101,24 @@ export default function App() {
     // Estimate target width and height of the warped rectangle (rectified label)
     const widthTop = Math.hypot(p1.x - p0.x, p1.y - p0.y);
     const widthBottom = Math.hypot(p2.x - p3.x, p2.y - p3.y);
-    const cropW = Math.max(10, Math.round((widthTop + widthBottom) / 2));
+    let cropW = Math.max(10, Math.round((widthTop + widthBottom) / 2));
 
     const heightLeft = Math.hypot(p3.x - p0.x, p3.y - p0.y);
     const heightRight = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    const cropH = Math.max(10, Math.round((heightLeft + heightRight) / 2));
+    let cropH = Math.max(10, Math.round((heightLeft + heightRight) / 2));
+
+    // Limit maximum cropped dimension to 1200px to ensure fast, reliable AI processing
+    // and prevent NetworkError payloads
+    const maxCropDim = 1200;
+    if (cropW > maxCropDim || cropH > maxCropDim) {
+      if (cropW > cropH) {
+        cropH = Math.round((cropH * maxCropDim) / cropW);
+        cropW = maxCropDim;
+      } else {
+        cropW = Math.round((cropW * maxCropDim) / cropH);
+        cropH = maxCropDim;
+      }
+    }
 
     const cropCanvas = document.createElement("canvas");
     cropCanvas.width = cropW;
@@ -995,12 +1514,12 @@ export default function App() {
     }
   };
 
-  // 2. Render whenever loadedImage, reconstructedImage, useReconstructedSource, params, specs, yarns, or manualEdits change
+  // 2. Render whenever loadedImage, reconstructedImage, useReconstructedSource, params, specs, yarns, manualEdits, or grid nudge settings change
   useEffect(() => {
     if (!loadedImage) return;
     sourceImageRef.current = useReconstructedSource && reconstructedImage ? reconstructedImage : loadedImage;
     renderProcessedOriginal();
-  }, [loadedImage, reconstructedImage, useReconstructedSource, params, specs, yarns, manualEdits]);
+  }, [loadedImage, reconstructedImage, useReconstructedSource, params, specs, yarns, manualEdits, gridNudgeX, gridNudgeY, gridNudgeScaleX, gridNudgeScaleY]);
 
   // Render the pre-processed canvas
   const renderProcessedOriginal = () => {
@@ -1011,57 +1530,73 @@ export default function App() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Set canvas dimensions based on image, taking care of rotation bounds
-    const rad = (params.rotation * Math.PI) / 180;
-    const absCos = Math.abs(Math.cos(rad));
-    const absSin = Math.abs(Math.sin(rad));
-    const rotatedW = Math.round(img.width * absCos + img.height * absSin);
-    const rotatedH = Math.round(img.width * absSin + img.height * absCos);
+    try {
+      // Set canvas dimensions based on image, taking care of rotation bounds
+      const rad = (params.rotation * Math.PI) / 180;
+      const absCos = Math.abs(Math.cos(rad));
+      const absSin = Math.abs(Math.sin(rad));
+      const rotatedW = Math.round(img.width * absCos + img.height * absSin);
+      const rotatedH = Math.round(img.width * absSin + img.height * absCos);
 
-    canvas.width = rotatedW;
-    canvas.height = rotatedH;
+      canvas.width = rotatedW;
+      canvas.height = rotatedH;
 
-    // Draw rotated image
-    ctx.clearRect(0, 0, rotatedW, rotatedH);
-    ctx.translate(rotatedW / 2, rotatedH / 2);
-    ctx.rotate(rad);
-    ctx.drawImage(img, -img.width / 2, -img.height / 2);
-    ctx.rotate(-rad);
-    ctx.translate(-rotatedW / 2, -rotatedH / 2);
+      // Draw rotated image
+      ctx.clearRect(0, 0, rotatedW, rotatedH);
+      ctx.translate(rotatedW / 2, rotatedH / 2);
+      ctx.rotate(rad);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      ctx.rotate(-rad);
+      ctx.translate(-rotatedW / 2, -rotatedH / 2);
 
-    // Apply brightness, contrast, and sharpening directly via ImageData manipulation
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = imgData.data;
+      // Only apply brightness/contrast filters to physical scans.
+      // Skipping them for pristine, flat-colored vector reconstructions preserves crisp edges.
+      if (!useReconstructedSource) {
+        // Apply brightness, contrast, and sharpening directly via ImageData manipulation
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = imgData.data;
 
-    // Filters: Contrast, Brightness, Denoise strength
-    const brightnessOffset = params.brightness * 2.55; // convert -100..100 to -255..255
-    const contrastFactor = (259 * (params.contrast + 255)) / (255 * (259 - params.contrast));
+        // Filters: Contrast, Brightness, Denoise strength
+        const brightnessOffset = params.brightness * 2.55; // convert -100..100 to -255..255
+        const contrastFactor = (259 * (params.contrast + 255)) / (255 * (259 - params.contrast));
 
-    for (let i = 0; i < d.length; i += 4) {
-      let r = d[i];
-      let g = d[i + 1];
-      let b = d[i + 2];
+        for (let i = 0; i < d.length; i += 4) {
+          let r = d[i];
+          let g = d[i + 1];
+          let b = d[i + 2];
 
-      // 1. Apply Brightness
-      r += brightnessOffset;
-      g += brightnessOffset;
-      b += brightnessOffset;
+          // 1. Apply Brightness
+          r += brightnessOffset;
+          g += brightnessOffset;
+          b += brightnessOffset;
 
-      // 2. Apply Contrast
-      r = contrastFactor * (r - 128) + 128;
-      g = contrastFactor * (g - 128) + 128;
-      b = contrastFactor * (b - 128) + 128;
+          // 2. Apply Contrast
+          r = contrastFactor * (r - 128) + 128;
+          g = contrastFactor * (g - 128) + 128;
+          b = contrastFactor * (b - 128) + 128;
 
-      // Bound clamping
-      d[i] = Math.max(0, Math.min(255, r));
-      d[i + 1] = Math.max(0, Math.min(255, g));
-      d[i + 2] = Math.max(0, Math.min(255, b));
+          // Bound clamping
+          d[i] = Math.max(0, Math.min(255, r));
+          d[i + 1] = Math.max(0, Math.min(255, g));
+          d[i + 2] = Math.max(0, Math.min(255, b));
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+      }
+
+      // After processing original image, compile the thread-level grid representation
+      renderThreadGrid();
+    } catch (err) {
+      console.error("Error rendering processed original image canvas:", err);
+      // Fallback: draw image directly
+      try {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        renderThreadGrid();
+      } catch (fallbackErr) {
+        console.error("Critical fallback failure:", fallbackErr);
+      }
     }
-
-    ctx.putImageData(imgData, 0, 0);
-
-    // After processing original image, compile the thread-level grid representation
-    renderThreadGrid();
   };
 
   // Resample original pre-processed image into a thread-aligned canvas
@@ -1089,15 +1624,70 @@ export default function App() {
     const gridImgData = gridCtx.createImageData(targetWidthPx, targetHeightPx);
     const gridData = gridImgData.data;
 
-    const sourceData = origCtx.getImageData(0, 0, origW, origH).data;
+    let sourceData: Uint8ClampedArray | null = null;
+    let actualW = origW;
+    let actualH = origH;
+    let actualCellW = cellW;
+    let actualCellH = cellH;
+
+    try {
+      sourceData = origCtx.getImageData(0, 0, origW, origH).data;
+    } catch (err) {
+      console.warn("Failed to read pixels from canvas (likely cross-origin taint on SVG). Falling back to original image scan source:", err);
+      try {
+        if (loadedImage) {
+          origCanvas.width = loadedImage.width;
+          origCanvas.height = loadedImage.height;
+          origCtx.clearRect(0, 0, loadedImage.width, loadedImage.height);
+          origCtx.drawImage(loadedImage, 0, 0);
+          
+          sourceData = origCtx.getImageData(0, 0, loadedImage.width, loadedImage.height).data;
+          actualW = loadedImage.width;
+          actualH = loadedImage.height;
+          actualCellW = loadedImage.width / targetWidthPx;
+          actualCellH = loadedImage.height / targetHeightPx;
+          
+          // Disable reconstructed source so further actions don't crash
+          setUseReconstructedSource(false);
+          showToast("Notice: Browser security restricted reading pixels from the SVG artwork. Automatically fell back to original scan for grid tracing.", "info");
+        }
+      } catch (fallbackErr) {
+        console.error("Critical fallback failure:", fallbackErr);
+      }
+    }
+
+    if (!sourceData) {
+      for (let i = 0; i < gridData.length; i += 4) {
+        gridData[i] = 255;
+        gridData[i + 1] = 255;
+        gridData[i + 2] = 255;
+        gridData[i + 3] = 255;
+      }
+      gridCtx.putImageData(gridImgData, 0, 0);
+      return;
+    }
+
+    const newAverages: Record<string, { r: number; g: number; b: number }> = {};
+
+    // Calculate scaling and offset based on nudge parameters
+    const scaleXFactor = gridNudgeScaleX / 100;
+    const scaleYFactor = gridNudgeScaleY / 100;
+    const offsetW = actualW * (1 - scaleXFactor) / 2;
+    const offsetH = actualH * (1 - scaleYFactor) / 2;
+
+    const rescaledW = actualW * scaleXFactor;
+    const rescaledH = actualH * scaleYFactor;
+
+    const scaledCellW = rescaledW / targetWidthPx;
+    const scaledCellH = rescaledH / targetHeightPx;
 
     for (let gy = 0; gy < targetHeightPx; gy++) {
       for (let gx = 0; gx < targetWidthPx; gx++) {
-        // Pixel bounding box inside original source canvas
-        const startX = Math.floor(gx * cellW);
-        const endX = Math.min(origW, Math.floor((gx + 1) * cellW));
-        const startY = Math.floor(gy * cellH);
-        const endY = Math.min(origH, Math.floor((gy + 1) * cellH));
+        // Pixel bounding box inside original source canvas, with nudge shifting and scale adjustment
+        const startX = Math.max(0, Math.min(actualW, Math.floor(offsetW + gx * scaledCellW + gridNudgeX)));
+        const endX = Math.max(0, Math.min(actualW, Math.floor(offsetW + (gx + 1) * scaledCellW + gridNudgeX)));
+        const startY = Math.max(0, Math.min(actualH, Math.floor(offsetH + gy * scaledCellH + gridNudgeY)));
+        const endY = Math.max(0, Math.min(actualH, Math.floor(offsetH + (gy + 1) * scaledCellH + gridNudgeY)));
 
         let sumR = 0;
         let sumG = 0;
@@ -1106,7 +1696,7 @@ export default function App() {
 
         for (let py = startY; py < endY; py++) {
           for (let px = startX; px < endX; px++) {
-            const idx = (py * origW + px) * 4;
+            const idx = (py * actualW + px) * 4;
             sumR += sourceData[idx];
             sumG += sourceData[idx + 1];
             sumB += sourceData[idx + 2];
@@ -1115,9 +1705,11 @@ export default function App() {
         }
 
         // Compute average color of this thread block
-        const avgR = count > 0 ? sumR / count : 255;
-        const avgG = count > 0 ? sumG / count : 255;
-        const avgB = count > 0 ? sumB / count : 255;
+        const avgR = count > 0 ? Math.round(sumR / count) : 255;
+        const avgG = count > 0 ? Math.round(sumG / count) : 255;
+        const avgB = count > 0 ? Math.round(sumB / count) : 255;
+
+        newAverages[`${gx},${gy}`] = { r: avgR, g: avgG, b: avgB };
 
         // Snap average to designer yarn palette using CIELAB CIE76
         let snappedHex = snapToPalette(avgR, avgG, avgB, yarns).hex;
@@ -1142,6 +1734,7 @@ export default function App() {
       }
     }
 
+    cellAveragesRef.current = newAverages;
     gridCtx.putImageData(gridImgData, 0, 0);
   };
 
@@ -1175,6 +1768,11 @@ export default function App() {
 
   // Get the physical scanned color of a particular grid cell from the pre-processed original canvas
   const getCellAverageColor = (gx: number, gy: number) => {
+    const key = `${gx},${gy}`;
+    if (cellAveragesRef.current && cellAveragesRef.current[key]) {
+      return cellAveragesRef.current[key];
+    }
+
     const origCanvas = originalCanvasRef.current;
     if (!origCanvas) return null;
     const ctx = origCanvas.getContext("2d");
@@ -1351,6 +1949,17 @@ export default function App() {
     }, 50);
   };
 
+  // Get color at a specific coordinate for 3D Jacquard fabric simulation
+  const getCellColor = (x: number, y: number): string => {
+    const key = `${x},${y}`;
+    if (manualEdits[key]) return manualEdits[key];
+    if (cellAveragesRef.current && cellAveragesRef.current[key]) {
+      const { r, g, b } = cellAveragesRef.current[key];
+      return snapToPalette(r, g, b, yarns).hex;
+    }
+    return yarns[0]?.hex || "#ffffff";
+  };
+
   // Export raw loom indices as an industrial CSV pattern format
   const exportLoomMatrixCSV = () => {
     let csvContent = "data:text/csv;charset=utf-8,";
@@ -1401,7 +2010,7 @@ export default function App() {
   const handleAddYarn = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newYarnHex.match(/^#[0-9a-fA-F]{6}$/)) {
-      alert("Please provide a valid 6-character hex color (e.g. #FFFFFF)");
+      showToast("Please provide a valid 6-character hex color (e.g. #FFFFFF)", "error");
       return;
     }
     const name = newYarnName.trim() || `Yarn ${yarns.length + 1}`;
@@ -1419,7 +2028,7 @@ export default function App() {
 
   const removeYarn = (id: string) => {
     if (yarns.length <= 1) {
-      alert("You need at least one yarn in the palette to generate a weave reference!");
+      showToast("You need at least one yarn in the palette to generate a weave reference!", "error");
       return;
     }
     setYarns(yarns.filter((y) => y.id !== id));
@@ -1526,6 +2135,43 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-stone-900 text-stone-100 font-sans selection:bg-[#ff0000] selection:text-white">
+      {/* Floating Toast Notification */}
+      {toast && (
+        <div className="fixed top-6 right-6 z-50 max-w-md bg-stone-950 border border-stone-800 rounded-xl shadow-2xl shadow-black/80 animate-in fade-in slide-in-from-top-4 duration-300 overflow-hidden">
+          <div className="p-4 flex gap-3 items-start">
+            <div className={`p-1.5 rounded-lg shrink-0 ${
+              toast.type === "error" 
+                ? "bg-red-500/15 text-red-500" 
+                : toast.type === "success"
+                ? "bg-emerald-500/15 text-emerald-500"
+                : "bg-blue-500/15 text-blue-500"
+            }`}>
+              {toast.type === "error" ? (
+                <AlertCircle className="w-5 h-5" />
+              ) : (
+                <Check className="w-5 h-5" />
+              )}
+            </div>
+            
+            <div className="flex-1 space-y-1">
+              <h4 className="text-sm font-semibold text-white">
+                {toast.type === "error" ? "Notification Alert" : toast.type === "success" ? "Success" : "Information"}
+              </h4>
+              <p className="text-xs leading-relaxed text-stone-300 whitespace-pre-line">
+                {toast.message}
+              </p>
+            </div>
+
+            <button
+              onClick={() => setToast(null)}
+              className="p-1 hover:bg-stone-900 rounded-lg text-stone-400 hover:text-white transition shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header Banner */}
       <header className="border-b border-stone-800 bg-stone-950 px-6 py-4 sticky top-0 z-40 backdrop-blur-md bg-opacity-95">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1593,25 +2239,7 @@ export default function App() {
                 onDrop={(e) => {
                   e.preventDefault();
                   if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                    const file = e.dataTransfer.files[0];
-                    setSelectedFile(file);
-                    const reader = new FileReader();
-                    reader.onload = (event) => {
-                      if (event.target?.result) {
-                        setRawImageSrc(event.target.result as string);
-                        setCropConfirmed(false);
-                        setCropRotation(0);
-                        setCropLeft(0);
-                        setCropRight(0);
-                        setCropTop(0);
-                        setCropBottom(0);
-                        setCornerTL({ x: 10, y: 10 });
-                        setCornerTR({ x: 90, y: 10 });
-                        setCornerBR({ x: 90, y: 90 });
-                        setCornerBL({ x: 10, y: 90 });
-                      }
-                    };
-                    reader.readAsDataURL(file);
+                    processAndSetFile(e.dataTransfer.files[0]);
                   }
                 }}
                 className="border-2 border-dashed border-stone-700 hover:border-red-500 hover:bg-stone-950/40 rounded-xl p-10 cursor-pointer transition-all duration-200 bg-stone-950/20 space-y-4"
@@ -2000,6 +2628,43 @@ export default function App() {
                         </button>
                       </div>
                     ))}
+                  </div>
+
+                  {/* Gemini AI Color Copilot */}
+                  <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg space-y-2">
+                    <span className="block text-[10px] font-mono text-stone-300 uppercase tracking-wide flex items-center gap-1.5 font-bold">
+                      <Sparkles className="w-3.5 h-3.5 text-red-400 animate-pulse" /> Gemini Palette Harmonizer
+                    </span>
+                    <p className="text-[10px] text-stone-400 leading-relaxed">
+                      Describe the desired theme or brand mood. Gemini will select and program a matching yarn dye palette:
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={palettePrompt}
+                        onChange={(e) => setPalettePrompt(e.target.value)}
+                        placeholder="e.g. vintage navy gold, pastel lavender, earth tones"
+                        className="bg-stone-950 border border-stone-850 rounded px-2.5 py-1.5 text-xs w-full text-white placeholder-stone-600 focus:outline-none focus:ring-1 focus:ring-red-500 font-sans"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleGeneratePalette();
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleGeneratePalette}
+                        disabled={isGeneratingPalette || !palettePrompt.trim()}
+                        className="bg-stone-800 hover:bg-stone-750 text-white text-xs px-3 rounded font-bold flex items-center gap-1 transition disabled:opacity-50 cursor-pointer shrink-0"
+                      >
+                        {isGeneratingPalette ? (
+                          <RefreshCw className="w-3 animate-spin text-red-400" />
+                        ) : (
+                          "Harmonize"
+                        )}
+                      </button>
+                    </div>
                   </div>
 
                   {/* Add new yarn form */}
@@ -2512,6 +3177,56 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Gemini Loom Setup Consultant */}
+                  <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg space-y-2">
+                    <span className="block text-[10px] font-mono text-stone-300 uppercase tracking-wide flex items-center gap-1.5 font-bold">
+                      <Sparkles className="w-3.5 h-3.5 text-red-400 animate-pulse" /> AI Loom Consultant
+                    </span>
+                    <p className="text-[10px] text-stone-400 leading-relaxed">
+                      Consult Gemini for MÜCAD jacquard programming setup (e.g. "optimize for thick wool" or "adjust for 50 denier damask"):
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={loomQuery}
+                        onChange={(e) => setLoomQuery(e.target.value)}
+                        placeholder="e.g. optimize for 50-denier polyester"
+                        className="bg-stone-950 border border-stone-850 rounded px-2.5 py-1.5 text-xs w-full text-white placeholder-stone-600 focus:outline-none focus:ring-1 focus:ring-red-500 font-sans"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleCalculateLoomSpecs();
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleCalculateLoomSpecs}
+                        disabled={isCalculatingSpecs || !loomQuery.trim()}
+                        className="bg-stone-800 hover:bg-stone-750 text-white text-xs px-3 rounded font-bold flex items-center gap-1 transition shrink-0 disabled:opacity-50 cursor-pointer"
+                      >
+                        {isCalculatingSpecs ? (
+                          <RefreshCw className="w-3 animate-spin text-red-400" />
+                        ) : (
+                          "Consult"
+                        )}
+                      </button>
+                    </div>
+                    {loomReasoning && (
+                      <div className="p-2.5 bg-stone-950 rounded border border-stone-850 text-[10.5px] text-stone-300 space-y-1 mt-1 max-h-40 overflow-y-auto">
+                        <p className="font-semibold text-red-400">Consultant Recommendation:</p>
+                        <p className="leading-normal">{loomReasoning}</p>
+                        {loomAdvice.length > 0 && (
+                          <ul className="list-disc pl-3.5 mt-1 text-[10px] text-stone-400 space-y-1">
+                            {loomAdvice.map((adv, i) => (
+                              <li key={i}>{adv}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="pt-2">
                     <button
                       onClick={() => setCropConfirmed(false)}
@@ -2608,6 +3323,199 @@ export default function App() {
                       className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600"
                     />
                   </div>
+
+                  {/* Gemini Filter Presets */}
+                  <div className="bg-stone-900 border border-stone-800 p-3 rounded-lg space-y-2 mt-2">
+                    <span className="block text-[10px] font-mono text-stone-300 uppercase tracking-wide flex items-center gap-1.5 font-bold">
+                      <Sparkles className="w-3.5 h-3.5 text-red-400 animate-pulse" /> Gemini Smart Filter Presets
+                    </span>
+                    <p className="text-[10px] text-stone-400">
+                      Use Gemini to instantly compute optimal edge sharpness, contrast, and denoising for the scan:
+                    </p>
+                    <div className="grid grid-cols-2 gap-1.5 pt-1">
+                      {[
+                        { id: "high-contrast", label: "Edge Contrast" },
+                        { id: "shadow-reduction", label: "Dampen Folds" },
+                        { id: "sharp-text", label: "Crisp Text" },
+                        { id: "glow-reduction", label: "Anti-Glare" },
+                      ].map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          disabled={isApplyingFilterPreset}
+                          onClick={() => handleApplyFilterPreset(preset.id)}
+                          className="bg-stone-950 hover:bg-stone-850 text-stone-300 border border-stone-850 rounded py-1 px-2 text-[10px] font-medium transition flex items-center justify-center gap-1 hover:text-white hover:border-red-500/50 disabled:opacity-50 cursor-pointer"
+                        >
+                          {isApplyingFilterPreset ? (
+                            <RefreshCw className="w-2.5 h-2.5 animate-spin text-red-400" />
+                          ) : (
+                            <Sparkle className="w-2.5 h-2.5 text-red-500" />
+                          )}
+                          <span>{preset.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Box 3: Sub-Pixel Grid Calibration & Nudge */}
+              <div className="bg-stone-950 border border-stone-800 rounded-xl p-5 space-y-4 shadow-md">
+                <div className="flex items-center justify-between border-b border-stone-800 pb-3">
+                  <h3 className="text-sm font-semibold tracking-wide text-white uppercase flex items-center gap-2">
+                    <Grid className="w-4 h-4 text-red-500" /> 3. Grid Alignment &amp; Nudge
+                  </h3>
+                  <span
+                    className="text-xs text-red-500 cursor-pointer hover:underline font-medium"
+                    onClick={() => {
+                      setGridNudgeX(0);
+                      setGridNudgeY(0);
+                      setGridNudgeScaleX(100);
+                      setGridNudgeScaleY(100);
+                    }}
+                  >
+                    Reset Grid
+                  </span>
+                </div>
+
+                <div className="space-y-4">
+                  {/* Grid Shifting Controls */}
+                  <div className="space-y-3">
+                    <div>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-stone-300 font-medium">Horizontal Shift (X-Offset)</span>
+                        <span className="font-mono text-red-500 font-semibold">{gridNudgeX} px</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeX((prev) => prev - 1)}
+                          className="px-2 py-1 bg-stone-900 border border-stone-800 rounded text-xs text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          -1px
+                        </button>
+                        <input
+                          type="range"
+                          min="-40"
+                          max="40"
+                          step="1"
+                          value={gridNudgeX}
+                          onChange={(e) => setGridNudgeX(parseInt(e.target.value))}
+                          className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600 flex-grow"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeX((prev) => prev + 1)}
+                          className="px-2 py-1 bg-stone-900 border border-stone-800 rounded text-xs text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          +1px
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-stone-300 font-medium">Vertical Shift (Y-Offset)</span>
+                        <span className="font-mono text-red-500 font-semibold">{gridNudgeY} px</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeY((prev) => prev - 1)}
+                          className="px-2 py-1 bg-stone-900 border border-stone-800 rounded text-xs text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          -1px
+                        </button>
+                        <input
+                          type="range"
+                          min="-40"
+                          max="40"
+                          step="1"
+                          value={gridNudgeY}
+                          onChange={(e) => setGridNudgeY(parseInt(e.target.value))}
+                          className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600 flex-grow"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeY((prev) => prev + 1)}
+                          className="px-2 py-1 bg-stone-900 border border-stone-800 rounded text-xs text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          +1px
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Grid Scaling Controls */}
+                  <div className="border-t border-stone-900 pt-3 space-y-3">
+                    <div>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-stone-300 font-medium">Horizontal Weave Scale (W-Stretch)</span>
+                        <span className="font-mono text-red-500 font-semibold">{gridNudgeScaleX.toFixed(1)}%</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeScaleX((prev) => Math.max(80, prev - 0.5))}
+                          className="px-1.5 py-1 bg-stone-900 border border-stone-800 rounded text-[10px] text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          -0.5%
+                        </button>
+                        <input
+                          type="range"
+                          min="80"
+                          max="120"
+                          step="0.1"
+                          value={gridNudgeScaleX}
+                          onChange={(e) => setGridNudgeScaleX(parseFloat(e.target.value))}
+                          className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600 flex-grow"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeScaleX((prev) => Math.min(120, prev + 0.5))}
+                          className="px-1.5 py-1 bg-stone-900 border border-stone-800 rounded text-[10px] text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          +0.5%
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-stone-300 font-medium">Vertical Weave Scale (H-Stretch)</span>
+                        <span className="font-mono text-red-500 font-semibold">{gridNudgeScaleY.toFixed(1)}%</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeScaleY((prev) => Math.max(80, prev - 0.5))}
+                          className="px-1.5 py-1 bg-stone-900 border border-stone-800 rounded text-[10px] text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          -0.5%
+                        </button>
+                        <input
+                          type="range"
+                          min="80"
+                          max="120"
+                          step="0.1"
+                          value={gridNudgeScaleY}
+                          onChange={(e) => setGridNudgeScaleY(parseFloat(e.target.value))}
+                          className="w-full h-1.5 bg-stone-800 rounded-lg appearance-none cursor-pointer accent-red-600 flex-grow"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setGridNudgeScaleY((prev) => Math.min(120, prev + 0.5))}
+                          className="px-1.5 py-1 bg-stone-900 border border-stone-800 rounded text-[10px] text-stone-300 hover:text-white hover:bg-stone-850 transition"
+                        >
+                          +0.5%
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <p className="text-[10px] text-stone-500 leading-relaxed bg-stone-900/30 p-2.5 rounded-lg border border-stone-900">
+                    💡 <strong>Calibration Fallback:</strong> If fabric curling occurs, use these sliders to nudge the sampling window sub-pixel by sub-pixel until aligned perfectly.
+                  </p>
                 </div>
               </div>
 
@@ -2666,20 +3574,48 @@ export default function App() {
                             </button>
                           </div>
 
-                          <div className="flex items-center gap-1.5 text-xs text-stone-400">
+                          <div className="flex items-center gap-1 text-xs text-stone-400">
                             <span>Zoom:</span>
-                            <select
-                              value={zoomLevel}
-                              onChange={(e) => setZoomLevel(parseInt(e.target.value))}
-                              className="bg-stone-900 border border-stone-800 rounded text-stone-200 px-2 py-1 outline-none text-xs"
-                            >
-                              <option value="1">1x (A4 layout)</option>
-                              <option value="2">2x</option>
-                              <option value="4">4x (Macro)</option>
-                              <option value="6">6x</option>
-                              <option value="8">8x (Micro Thread)</option>
-                              <option value="12">12x (Deep Inspect)</option>
-                            </select>
+                            <div className="flex items-center bg-stone-900 border border-stone-800 rounded p-0.5 gap-0.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const levels = [1, 2, 4, 6, 8, 12];
+                                  const currentIdx = levels.indexOf(zoomLevel);
+                                  if (currentIdx > 0) setZoomLevel(levels[currentIdx - 1]);
+                                }}
+                                className="p-1 hover:bg-stone-800 rounded text-stone-300 hover:text-white transition cursor-pointer"
+                                title="Zoom Out"
+                              >
+                                <ZoomOut className="w-3.5 h-3.5" />
+                              </button>
+                              
+                              <select
+                                value={zoomLevel}
+                                onChange={(e) => setZoomLevel(parseInt(e.target.value))}
+                                className="bg-transparent border-none text-stone-200 px-1 py-0.5 outline-none text-xs font-medium cursor-pointer"
+                              >
+                                <option value="1" className="bg-stone-950">1x (A4)</option>
+                                <option value="2" className="bg-stone-950">2x</option>
+                                <option value="4" className="bg-stone-950">4x (Macro)</option>
+                                <option value="6" className="bg-stone-950">6x</option>
+                                <option value="8" className="bg-stone-950">8x (Micro)</option>
+                                <option value="12" className="bg-stone-950">12x (Deep)</option>
+                              </select>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const levels = [1, 2, 4, 6, 8, 12];
+                                  const currentIdx = levels.indexOf(zoomLevel);
+                                  if (currentIdx !== -1 && currentIdx < levels.length - 1) setZoomLevel(levels[currentIdx + 1]);
+                                }}
+                                className="p-1 hover:bg-stone-800 rounded text-stone-300 hover:text-white transition cursor-pointer"
+                                title="Zoom In"
+                              >
+                                <ZoomIn className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -2697,6 +3633,20 @@ export default function App() {
                             <p className="text-[11px] text-stone-400 max-w-xl leading-relaxed">
                               Uses advanced vision analysis to faithfully reconstruct the design. Recreates text using matching Google web fonts, refines logos/borders into smooth vector shapes, and eliminates all weft/warp scanning noise.
                             </p>
+
+                            {/* Gemini Custom Refinement Prompt */}
+                            <div className="bg-stone-950/40 p-2.5 rounded-lg border border-stone-850 space-y-1.5 mt-2">
+                              <span className="block text-[10px] font-mono text-stone-300 uppercase tracking-wide flex items-center gap-1.5 font-bold">
+                                <Sparkles className="w-3.5 h-3.5 text-red-400 animate-pulse" /> AI Refinement Prompt (Optional)
+                              </span>
+                              <input
+                                type="text"
+                                value={refinementPrompt}
+                                onChange={(e) => setRefinementPrompt(e.target.value)}
+                                placeholder="e.g. Translate text to English, thicken borders, change background to deep gold"
+                                className="bg-stone-950 border border-stone-800 rounded px-2.5 py-1.5 text-xs w-full text-white placeholder-stone-600 focus:outline-none focus:ring-1 focus:ring-red-500 font-sans"
+                              />
+                            </div>
                           </div>
 
                           <div className="flex sm:flex-col gap-2 shrink-0">
@@ -2858,6 +3808,41 @@ export default function App() {
                                   <option value="3">3x3 Cells</option>
                                 </select>
                               </div>
+
+                              {/* Gemini AI Paint Copilot */}
+                              <div className="flex items-center gap-1.5 border-l border-stone-800 pl-3">
+                                <span className="text-[11px] text-stone-300 font-bold shrink-0 flex items-center gap-1">
+                                  <Sparkles className="w-3.5 h-3.5 text-red-400 animate-pulse" /> AI Paint Copilot:
+                                </span>
+                                <div className="flex gap-1.5">
+                                  <input
+                                    type="text"
+                                    value={paintInstruction}
+                                    onChange={(e) => setPaintInstruction(e.target.value)}
+                                    placeholder="e.g. Draw a red 1px border, or color center cells"
+                                    className="bg-stone-950 border border-stone-800 rounded px-2 py-1 text-[11px] w-48 text-stone-200 placeholder-stone-600 focus:outline-none focus:ring-1 focus:ring-red-500 font-sans"
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        handleApplyPaintCopilot();
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={handleApplyPaintCopilot}
+                                    disabled={isProcessingPaint || !paintInstruction.trim()}
+                                    className="bg-stone-800 hover:bg-stone-750 text-white text-[11px] px-2 py-1 rounded font-bold transition flex items-center gap-1 shrink-0 disabled:opacity-50 cursor-pointer"
+                                    title="Submit painting instruction to AI Copilot"
+                                  >
+                                    {isProcessingPaint ? (
+                                      <RefreshCw className="w-3 h-3 animate-spin text-red-400" />
+                                    ) : (
+                                      "Paint"
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           )}
                         </div>
@@ -2906,6 +3891,18 @@ export default function App() {
                                   imageRendering: "pixelated",
                                 }}
                               />
+
+                              {/* Optional Loom Grid Overlay over Original Scan */}
+                              {showGridOverlay && (
+                                <div
+                                  className="absolute inset-0 pointer-events-none z-5"
+                                  style={{
+                                    backgroundImage: `linear-gradient(to right, rgba(100, 116, 139, 0.25) 1px, transparent 1px),
+                                                      linear-gradient(to bottom, rgba(100, 116, 139, 0.25) 1px, transparent 1px)`,
+                                    backgroundSize: `${zoomLevel}px ${zoomLevel}px`,
+                                  }}
+                                />
+                              )}
 
                               {/* Synced Cursor Hover Box Overlay */}
                               {hoveredCell && (
@@ -3084,6 +4081,15 @@ export default function App() {
                   );
                 })()}
               </div>
+
+              {/* Real-time 3D Jacquard Fabric & Weave structure Simulator */}
+              <JacquardWeaveSimulator
+                targetWidthPx={targetWidthPx}
+                targetHeightPx={targetHeightPx}
+                yarns={yarns}
+                getCellColor={getCellColor}
+                isProcessing={isProcessingPaint}
+              />
 
             </div>
 
